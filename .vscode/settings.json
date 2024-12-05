@@ -1,0 +1,16 @@
+{
+    "cmake.ignoreCMakeListsMissing": true,
+    "clangd.arguments": [
+        "-compile-commands-dir=builddir"
+    ],
+    "C_Cpp.default.compileCommands": "/home/chris/Source/schnell/builddir/compile_commands.json",
+    "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
+    "files.associations": {
+        "utility": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "__split_buffer": "cpp",
+        "list": "cpp"
+    }
+}
