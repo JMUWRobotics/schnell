@@ -1,9 +1,4 @@
-project('schnell', 'cpp',
-    version: '0.1',
-    default_options: [
-        'warning_level=3'
-    ]
-)
+project('schnell', 'cpp', version: '0.1')
 
 cmake = import('cmake')
 cctag_opts = cmake.subproject_options()
@@ -16,7 +11,6 @@ cctag_opts.add_cmake_defines({
     'CMAKE_BUILD_TYPE': 'Release'
 })
 cctag = cmake.subproject('CCTag', options: cctag_opts)
-
 
 # opencv...
 add_project_arguments(
@@ -39,5 +33,5 @@ executable('schnell',
         dependency('apriltag'),
         cctag.dependency('CCTag')
     ],
-    override_options: ['cpp_std=c++23']
+    override_options: ['cpp_std=c++23', 'warning_level=3']
 )

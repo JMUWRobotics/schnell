@@ -2,18 +2,22 @@
 #include <algorithm>
 #include <print>
 #include <set>
+#include <stdexcept>
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/calib3d.hpp>
+#include <boost/range/algorithm/transform.hpp>
+
+#include "cctag/Detection.hpp"
 
 image_u8_t april_from_mat(const cv::Mat_<uint8_t>& m) {
-    return (image_u8_t) {
+    return image_u8_t {
         .width  = m.cols,
         .height = m.rows,
-        .stride = m.step,
+        .stride = (int)m.step,
         .buf    = m.data
     };
 }
@@ -35,24 +39,23 @@ std::vector<apriltag_detection_t> dectvec_from_zarray(zarray_t *&&z) {
     return ret;
 }
 
-void intersect_dectvecs(
+void intersect_apriltag_dects(
     std::vector<apriltag_detection_t> &l,
     std::vector<apriltag_detection_t> &r,
     std::vector<cv::Vec2d> &lout,
     std::vector<cv::Vec2d> &rout
 ) {
+    static const auto idcomp = [](const auto& l, const auto& r) { return l.id < r.id; };
+    static const auto idmap = [](const auto &d) { return d.id; };
+
     std::vector<int> lids, rids;
     std::set<int> isect;
-
-    auto idcomp = [](const auto& l, const auto& r) { return l.id < r.id; };
 
     std::ranges::sort(l, idcomp);
     std::ranges::sort(r, idcomp);
 
-    auto map = [](const auto &d){ return d.id; };
-
-    std::ranges::transform(l, std::back_inserter(lids), map);
-    std::ranges::transform(r, std::back_inserter(rids), map);
+    std::ranges::transform(l, std::back_inserter(lids), idmap);
+    std::ranges::transform(r, std::back_inserter(rids), idmap);
 
     std::ranges::set_intersection(lids, rids, std::inserter(isect, isect.begin()));
 
@@ -67,16 +70,43 @@ void intersect_dectvecs(
     fill_out(rids, r, rout);    
 }
 
-void detect_union(
-    const char *lpath,
-    const char *rpath,
-    std::vector<cv::Vec2d> &ldects,
-    std::vector<cv::Vec2d> &rdects    
+void intersect_cctag_dects(
+    boost::ptr_list<cctag::CCTag> &l,
+    boost::ptr_list<cctag::CCTag> &r,
+    std::vector<cv::Vec2d> &lout,
+    std::vector<cv::Vec2d> &rout
 ) {
-    cv::Mat_<uint8_t>
-        limg = cv::imread(lpath, cv::IMREAD_GRAYSCALE),
-        rimg = cv::imread(rpath, cv::IMREAD_GRAYSCALE);
+    static const auto idcomp = [](const auto& l, const auto& r) { return l.id() < r.id(); };
+    static const auto idmap = [](const auto &d) { return d.id(); };
 
+    std::vector<int> lids, rids;
+    std::set<int> isect;
+
+    l.sort(idcomp);
+    r.sort(idcomp);
+
+    boost::transform(l, std::back_inserter(lids), idmap);
+    boost::transform(r, std::back_inserter(rids), idmap);
+
+    std::ranges::set_intersection(lids, rids, std::inserter(isect, isect.begin()));
+
+    auto fill_out = [&](const auto &ids, const auto &d, auto &out) {
+        auto dit = d.cbegin();
+        for (size_t i = 0; i < ids.size(); ++i, ++dit)
+            if (isect.contains(ids[i]))
+                out.push_back({ dit->x(), dit->y() });
+    };
+
+    fill_out(lids, l, lout);
+    fill_out(rids, r, rout);
+}
+
+void detect_apriltags(
+    const cv::Mat_<uint8_t> &limg,
+    const cv::Mat_<uint8_t> &rimg,
+    std::vector<cv::Vec2d> &ldects,
+    std::vector<cv::Vec2d> &rdects
+) {
     apriltag_detector_t *d = apriltag_detector_create();
     apriltag_family_t   *f = tag36h11_create();
     apriltag_detector_add_family(d, f);
@@ -98,7 +128,23 @@ void detect_union(
     tag36h11_destroy(f);
     apriltag_detector_destroy(d);
 
-    intersect_dectvecs(ld, rd, ldects, rdects);
+    intersect_apriltag_dects(ld, rd, ldects, rdects);
+}
+
+void detect_cctags(
+    const cv::Mat_<uint8_t> &limg,
+    const cv::Mat_<uint8_t> &rimg,
+    std::vector<cv::Vec2d> &ldects,
+    std::vector<cv::Vec2d> &rdects 
+) {
+    static const cctag::Parameters cctp { 4 };
+    static const cctag::CCTagMarkersBank cctb { cctp._nCrowns };
+
+    boost::ptr_list<cctag::CCTag> ld, rd;
+    cctag::cctagDetection(ld, 0, 0, limg, cctp, cctb);
+    cctag::cctagDetection(rd, 0, 0, rimg, cctp, cctb);
+
+    intersect_cctag_dects(ld, rd, ldects, rdects);
 }
 
 cv::Matx34d read_P(const char *path) {
@@ -114,13 +160,25 @@ cv::Matx34d read_P(const char *path) {
 
 int main(int argc, const char **argv) {
 
-    if (argc != 5) {
-        std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal]", argv[0]);
+    if (argc != 6) {
+        std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag]", argv[0]);
         return 1;
     }
 
+    std::string tag = argv[5];
+
+    cv::Mat_<uint8_t>
+        limg = cv::imread(argv[1], cv::IMREAD_GRAYSCALE),
+        rimg = cv::imread(argv[2], cv::IMREAD_GRAYSCALE);
+
     std::vector<cv::Vec2d> ldects, rdects;
-    detect_union(argv[1], argv[2], ldects, rdects);
+    if (tag == "cctag")
+        detect_cctags(limg, rimg, ldects, rdects);
+    else
+        detect_apriltags(limg, rimg, ldects, rdects);
+
+    if (ldects.empty() || rdects.empty())
+        throw std::invalid_argument("No detections");
 
     for (size_t i = 0; i < ldects.size(); ++i)
         std::println("({}, {}) | ({}, {})", ldects[i][0], ldects[i][1], rdects[i][0], rdects[i][1]);
