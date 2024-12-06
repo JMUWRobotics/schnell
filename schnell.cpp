@@ -11,6 +11,7 @@
 #include <opencv2/calib3d.hpp>
 #include <boost/range/algorithm/transform.hpp>
 #include <boost/range/combine.hpp>
+#include <nlohmann/json.hpp>
 
 #include "cctag/Detection.hpp"
 
@@ -64,7 +65,7 @@ void intersect_apriltag_dects(
         for (size_t i = 0; i < ids.size(); ++i)
             if (isect.contains(ids[i]))
                 for (int j = 0; j < 4; ++j)
-                    out.push_back({ d[i].p[j][0], d[i].p[j][1] });
+                    out.push_back({ (float)d[i].p[j][0], (float)d[i].p[j][1] });
     };
 
     fill_out(lids, l, lout);
@@ -152,7 +153,7 @@ auto read_PT(const char *path) {
     cv::FileStorage fs(path, cv::FileStorage::READ);
 
     cv::Matx34d P;
-    cv::Vec3d T;
+    cv::Matx31d T;
     fs["rect_proj"] >> P;
     fs["T"] >> T;
 
@@ -164,17 +165,32 @@ auto read_PT(const char *path) {
 constexpr double infinity = std::numeric_limits<double>::infinity();
 
 constexpr bool almost_zero(double x) {
-    constexpr double epsilon = FLT_EPSILON * 2;
-    return std::abs(x) < epsilon;
+    // https://numpy.org/doc/stable/reference/generated/numpy.isclose.html#
+    constexpr double atol = 1e-08;
+    return std::abs(x) <= atol;
 }
 
-struct Line {
+class Line {
+    std::optional<Eigen::Matrix4d> _pluecker;
+public:
     Eigen::Vector3d dir, pt;
-    Line(const Eigen::Vector3d &direction, const Eigen::Vector3d &point) : dir(direction.stableNormalized()), pt(point) { }
+    Line(const Eigen::Vector3d &direction, const Eigen::Vector3d &point) : dir(direction.normalized()), pt(point) { }
     auto distance_to(const Eigen::Vector3d &other_pt) const {
         double proj_len = (other_pt - pt).dot(dir);
         auto closest_pt = pt + proj_len * dir;
         return other_pt - closest_pt;
+    }
+    Eigen::Matrix4d pluecker() {
+        if (!_pluecker.has_value()) {
+            Eigen::Vector4d a, b;
+
+            a << pt + dir, 1.0;
+            b << pt      , 1.0;
+
+            _pluecker = a * b.transpose() - b * a.transpose();
+        }
+
+        return _pluecker.value();
     }
 };
 
@@ -182,32 +198,25 @@ struct Plane {
     Eigen::Vector3d pt;
     Eigen::Vector4d abcd;
     Plane(const Eigen::Vector3d &perpvec, const Eigen::Vector3d &point) : pt(point) {
-        auto norm = perpvec.stableNormalized();
+        auto norm = perpvec.normalized();
         double d = point.dot(-norm);
         abcd << norm, d;
     }
 
-    Eigen::Vector4d intersect_with_(const Line &line) const {
-        Eigen::Vector4d a, b;
-
-        a << line.pt + line.dir, 1.0;
-        b << line.pt           , 1.0;
-
-        /* plücker-matrix */
-        return (a * b.transpose() - b * a.transpose()).transpose() * abcd;
+    Eigen::Vector4d intersect_with_(Line &line) const {
+        return line.pluecker() * abcd;
     }
 
-    Eigen::Vector3d intersect_with(const Line &line) const {
+    Eigen::Vector3d intersect_with(Line &line) const {
         auto hom = intersect_with_(line);
         if (almost_zero(hom.w())) 
             return Eigen::Vector3d { infinity, infinity, infinity };
-        
         return hom.head(3) / hom.w();
     }
 
     Eigen::Vector3d refract(const Line &line, bool backwards = false) const {
         double r = 1.333; // air -> water
-        Eigen::Vector3d n = abcd(Eigen::seq(0, 2));
+        Eigen::Vector3d n = abcd.head(3);
         if (backwards) {
             r = 1 / r;
             n = -n;
@@ -243,10 +252,10 @@ void forward_refract_estimate(
     lisects.clear();
     risects.clear();
 
-    std::ranges::transform(llines, std::back_inserter(lisects), [&plane](const auto &l) {
+    std::ranges::transform(llines, std::back_inserter(lisects), [&plane](auto &l) {
         return plane.intersect_with(l);
     });
-    std::ranges::transform(rlines, std::back_inserter(risects), [&plane](const auto &l) {
+    std::ranges::transform(rlines, std::back_inserter(risects), [&plane](auto &l) {
         return plane.intersect_with(l);
     });
 
@@ -264,18 +273,20 @@ void forward_refract_estimate(
         Plane rrefrplane(rline.dir.cross(r), rpt),
               lrefrplane(lline.dir.cross(l), lpt);
 
+        Line lrefrline(l, lpt),
+             rrefrline(r, rpt);
+
         lestimates.push_back(
-            rrefrplane.intersect_with(Line(l, lpt))
+            rrefrplane.intersect_with(lrefrline)
         );
         restimates.push_back(
-            lrefrplane.intersect_with(Line(r, rpt))
+            lrefrplane.intersect_with(rrefrline)
         );
     }
 }
 
 
 int main(int argc, const char **argv) {
-
     if (argc != 6) {
         std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag]", argv[0]);
         return 1;
@@ -302,25 +313,33 @@ int main(int argc, const char **argv) {
     auto [lP, _] = read_PT(argv[3]);
     auto [rP, T_] = read_PT(argv[4]);
 
-    std::vector<cv::Vec4d> warped3D_;
+    cv::Mat warped3D_;
     std::vector<Eigen::Vector3d> warped3D;
     Eigen::Vector3d T { T_.val };
+    T = -T;
 
     cv::triangulatePoints(lP, rP, ldects, rdects, warped3D_);
 
-    std::ranges::transform(warped3D_, std::back_inserter(warped3D), [](const cv::Vec4d &hom) {
-        auto [x, y, z, w] = hom.val;
-        return Eigen::Vector3d { x/w, y/w, z/w };
-    });
+    for (int col = 0; col < warped3D_.cols; ++col) {
+        cv::Vec4f hom_pt = warped3D_.col(col);
+        auto [x, y, z, w] = hom_pt.val;
+        warped3D.push_back(Eigen::Vector3d {
+            x/w, y/w, z/w
+        });
+    }
 
     std::vector<Eigen::Vector3d> lestimates, restimates, lisects, risects;
 
     Plane someplane(
-        Eigen::Vector3d { 0.0, 0.25, 0.5 },
+        Eigen::Vector3d { -0.0, -0.25, -0.5 },
         Eigen::Vector3d { 0.2, -0.05, 0.4 }
     );
 
     forward_refract_estimate(warped3D, T, someplane, lestimates, restimates, lisects, risects);
 
+    nlohmann::json serialized = {
+        {"lestimates", lestimates}
+    };
 
+    std::println("{}", serialized.dump());
 }

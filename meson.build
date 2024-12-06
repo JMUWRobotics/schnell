@@ -31,6 +31,7 @@ executable('schnell',
         dependency('eigen3'),
         dependency('opencv4'),
         dependency('apriltag'),
+        dependency('nlohmann_json'),
         cctag.dependency('CCTag')
     ],
     override_options: ['cpp_std=c++23', 'warning_level=3']
