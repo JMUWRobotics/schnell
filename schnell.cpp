@@ -10,6 +10,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/calib3d.hpp>
 #include <boost/range/algorithm/transform.hpp>
+#include <boost/range/combine.hpp>
 
 #include "cctag/Detection.hpp"
 
@@ -147,16 +148,131 @@ void detect_cctags(
     intersect_cctag_dects(ld, rd, ldects, rdects);
 }
 
-cv::Matx34d read_P(const char *path) {
+auto read_PT(const char *path) {
     cv::FileStorage fs(path, cv::FileStorage::READ);
 
     cv::Matx34d P;
-    fs["Q"] >> P;
+    cv::Vec3d T;
+    fs["rect_proj"] >> P;
+    fs["T"] >> T;
 
     fs.release();
 
-    return P;
+    return std::make_tuple(P, T);
 }
+
+constexpr double infinity = std::numeric_limits<double>::infinity();
+
+constexpr bool almost_zero(double x) {
+    constexpr double epsilon = FLT_EPSILON * 2;
+    return std::abs(x) < epsilon;
+}
+
+struct Line {
+    Eigen::Vector3d dir, pt;
+    Line(const Eigen::Vector3d &direction, const Eigen::Vector3d &point) : dir(direction.stableNormalized()), pt(point) { }
+    auto distance_to(const Eigen::Vector3d &other_pt) const {
+        double proj_len = (other_pt - pt).dot(dir);
+        auto closest_pt = pt + proj_len * dir;
+        return other_pt - closest_pt;
+    }
+};
+
+struct Plane {
+    Eigen::Vector3d pt;
+    Eigen::Vector4d abcd;
+    Plane(const Eigen::Vector3d &perpvec, const Eigen::Vector3d &point) : pt(point) {
+        auto norm = perpvec.stableNormalized();
+        double d = point.dot(-norm);
+        abcd << norm, d;
+    }
+
+    Eigen::Vector4d intersect_with_(const Line &line) const {
+        Eigen::Vector4d a, b;
+
+        a << line.pt + line.dir, 1.0;
+        b << line.pt           , 1.0;
+
+        /* plücker-matrix */
+        return (a * b.transpose() - b * a.transpose()).transpose() * abcd;
+    }
+
+    Eigen::Vector3d intersect_with(const Line &line) const {
+        auto hom = intersect_with_(line);
+        if (almost_zero(hom.w())) 
+            return Eigen::Vector3d { infinity, infinity, infinity };
+        
+        return hom.head(3) / hom.w();
+    }
+
+    Eigen::Vector3d refract(const Line &line, bool backwards = false) const {
+        double r = 1.333; // air -> water
+        Eigen::Vector3d n = abcd(Eigen::seq(0, 2));
+        if (backwards) {
+            r = 1 / r;
+            n = -n;
+        }
+
+        double c = -n.dot(line.dir);
+        return r * line.dir + n * (r * c - std::sqrt(1 - r * r * (1 - c * c)));
+    }
+};
+
+void forward_refract_estimate(
+    const std::vector<Eigen::Vector3d> &scene_pts,
+    const Eigen::Vector3d &baseline,
+    const Plane &plane,
+    std::vector<Eigen::Vector3d> &lestimates,
+    std::vector<Eigen::Vector3d> &restimates,
+    std::vector<Eigen::Vector3d> &lisects,
+    std::vector<Eigen::Vector3d> &risects
+) {
+    std::vector<Line> llines, rlines;
+    std::vector<Eigen::Vector3d> lrefr, rrefr;
+
+    llines.reserve(scene_pts.size());
+    rlines.reserve(scene_pts.size());
+
+    std::ranges::transform(scene_pts, std::back_inserter(llines), [](const auto &pt) {
+        return Line(pt, Eigen::Vector3d::Zero());
+    });
+    std::ranges::transform(scene_pts, std::back_inserter(rlines), [&baseline](const auto &pt) {
+        return Line(pt - baseline, baseline);
+    });
+
+    lisects.clear();
+    risects.clear();
+
+    std::ranges::transform(llines, std::back_inserter(lisects), [&plane](const auto &l) {
+        return plane.intersect_with(l);
+    });
+    std::ranges::transform(rlines, std::back_inserter(risects), [&plane](const auto &l) {
+        return plane.intersect_with(l);
+    });
+
+    std::ranges::transform(rlines, std::back_inserter(lrefr), [&plane](const auto &l) {
+        return plane.refract(l);
+    });
+    std::ranges::transform(llines, std::back_inserter(rrefr), [&plane](const auto &l) {
+        return plane.refract(l);
+    });
+
+    lestimates.clear();
+    restimates.clear();
+
+    for (const auto &[l, r, lpt, rpt, lline, rline] : boost::combine(lrefr, rrefr, lisects, risects, llines, rlines)) {
+        Plane rrefrplane(rline.dir.cross(r), rpt),
+              lrefrplane(lline.dir.cross(l), lpt);
+
+        lestimates.push_back(
+            rrefrplane.intersect_with(Line(l, lpt))
+        );
+        restimates.push_back(
+            lrefrplane.intersect_with(Line(r, rpt))
+        );
+    }
+}
+
 
 int main(int argc, const char **argv) {
 
@@ -183,11 +299,28 @@ int main(int argc, const char **argv) {
     for (size_t i = 0; i < ldects.size(); ++i)
         std::println("({}, {}) | ({}, {})", ldects[i][0], ldects[i][1], rdects[i][0], rdects[i][1]);
 
-    cv::Matx34d
-        lP = read_P(argv[3]),
-        rP = read_P(argv[4]);
+    auto [lP, _] = read_PT(argv[3]);
+    auto [rP, T_] = read_PT(argv[4]);
 
-    std::vector<cv::Vec4d> warped3D;
+    std::vector<cv::Vec4d> warped3D_;
+    std::vector<Eigen::Vector3d> warped3D;
+    Eigen::Vector3d T { T_.val };
 
-    cv::triangulatePoints(lP, rP, ldects, rdects, warped3D);
+    cv::triangulatePoints(lP, rP, ldects, rdects, warped3D_);
+
+    std::ranges::transform(warped3D_, std::back_inserter(warped3D), [](const cv::Vec4d &hom) {
+        auto [x, y, z, w] = hom.val;
+        return Eigen::Vector3d { x/w, y/w, z/w };
+    });
+
+    std::vector<Eigen::Vector3d> lestimates, restimates, lisects, risects;
+
+    Plane someplane(
+        Eigen::Vector3d { 0.0, 0.25, 0.5 },
+        Eigen::Vector3d { 0.2, -0.05, 0.4 }
+    );
+
+    forward_refract_estimate(warped3D, T, someplane, lestimates, restimates, lisects, risects);
+
+
 }
