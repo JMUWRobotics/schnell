@@ -65,7 +65,7 @@ void intersect_apriltag_dects(
         for (size_t i = 0; i < ids.size(); ++i)
             if (isect.contains(ids[i]))
                 for (int j = 0; j < 4; ++j)
-                    out.push_back({ (float)d[i].p[j][0], (float)d[i].p[j][1] });
+                    out.push_back({ d[i].p[j][0], d[i].p[j][1] });
     };
 
     fill_out(lids, l, lout);
@@ -266,10 +266,10 @@ void forward_refract_estimate(
         return plane.intersect_with(l);
     });
 
-    std::ranges::transform(rlines, std::back_inserter(lrefr), [&plane](const auto &l) {
+    std::ranges::transform(llines, std::back_inserter(lrefr), [&plane](const auto &l) {
         return plane.refract(l);
     });
-    std::ranges::transform(llines, std::back_inserter(rrefr), [&plane](const auto &l) {
+    std::ranges::transform(rlines, std::back_inserter(rrefr), [&plane](const auto &l) {
         return plane.refract(l);
     });
 
