@@ -204,7 +204,7 @@ struct Plane {
     }
 
     Eigen::Vector4d intersect_with_(Line &line) const {
-        return line.pluecker() * abcd;
+        return line.pluecker().transpose() * abcd;
     }
 
     Eigen::Vector3d intersect_with(Line &line) const {
@@ -226,6 +226,13 @@ struct Plane {
         return r * line.dir + n * (r * c - std::sqrt(1 - r * r * (1 - c * c)));
     }
 };
+
+void to_json(nlohmann::json &j, const Plane &p) {
+    j = {
+        {"pt", p.pt},
+        {"abcd", p.abcd}
+    };
+}
 
 void forward_refract_estimate(
     const std::vector<Eigen::Vector3d> &scene_pts,
@@ -307,9 +314,6 @@ int main(int argc, const char **argv) {
     if (ldects.empty() || rdects.empty())
         throw std::invalid_argument("No detections");
 
-    for (size_t i = 0; i < ldects.size(); ++i)
-        std::println("({}, {}) | ({}, {})", ldects[i][0], ldects[i][1], rdects[i][0], rdects[i][1]);
-
     auto [lP, _] = read_PT(argv[3]);
     auto [rP, T_] = read_PT(argv[4]);
 
@@ -331,14 +335,18 @@ int main(int argc, const char **argv) {
     std::vector<Eigen::Vector3d> lestimates, restimates, lisects, risects;
 
     Plane someplane(
-        Eigen::Vector3d { -0.0, -0.25, -0.5 },
+        Eigen::Vector3d { 0.0, -0.25, -0.5 },
         Eigen::Vector3d { 0.2, -0.05, 0.4 }
     );
 
     forward_refract_estimate(warped3D, T, someplane, lestimates, restimates, lisects, risects);
 
     nlohmann::json serialized = {
-        {"lestimates", lestimates}
+        {"scenepoints", warped3D  },
+        {"someplane",   someplane },
+        {"lestimates",  lestimates},
+        {"restimates",  restimates},
+        {"baseline",    T         }
     };
 
     std::println("{}", serialized.dump());
