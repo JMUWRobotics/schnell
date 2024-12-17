@@ -217,10 +217,10 @@ struct Plane {
     Eigen::Vector3d refract(const Line &line, bool backwards = false) const {
         double r = 1.333; // air -> water
         Eigen::Vector3d n = abcd.head(3);
-        if (backwards) {
-            r = 1 / r;
+        if (backwards)
             n = -n;
-        }
+        else
+            r = 1 / r;
 
         double c = -n.dot(line.dir);
         return r * line.dir + n * (r * c - std::sqrt(1 - r * r * (1 - c * c)));
