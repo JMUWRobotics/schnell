@@ -6,6 +6,7 @@
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
+#include <ceres/ceres.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/calib3d.hpp>
@@ -13,7 +14,14 @@
 #include <boost/range/combine.hpp>
 #include <nlohmann/json.hpp>
 
-#include "cctag/Detection.hpp"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wreorder"
+#define BOOST_ALLOW_DEPRECATED_HEADERS
+
+#include "cctag/Detection.hpp" // noisy fucking library
+
+#undef BOOST_ALLOW_DEPRECATED_HEADERS
+#pragma GCC diagnostic pop
 
 using Eigen::Vector3d;
 using Vectors3d = std::vector<Vector3d>;
@@ -298,22 +306,32 @@ void forward_refract_estimate(
     }
 }
 
-Vectors3d back_refract(
+void back_refract(
     const Vectors3d &estimates,
     const Vectors3d &isects,
     const Vector3d &baseline,
-    const Plane &someplane
+    const Plane &someplane,
+    Vectors3d &distances,
+    Vectors3d *backrefractions
 ) {
-    Vectors3d distances;
+    Vectors3d backrefractions_;
+    if (!backrefractions)
+        backrefractions = &backrefractions_;
+    else
+        backrefractions->clear();
+    
+    distances.clear();
 
-    transform(boost::combine(estimates, isects), std::back_inserter(distances), [&](const auto &tup) {
-        auto [est, isect] = tup;
+    transform(boost::combine(estimates, isects), std::back_inserter(*backrefractions), [&someplane](const auto &tup) {
+        auto &[est, isect] = tup;
         auto l = Line { isect - est, est };
-        auto refr = someplane.refract(l, true);
-        return Line(refr, isect).distance_to(baseline);
+        return someplane.refract(l, true);
     });
 
-    return distances;
+    transform(boost::combine(*backrefractions, isects), std::back_inserter(distances), [&](const auto &tup) {
+        auto &[refr, isect] = tup;
+        return Line(refr, isect).distance_to(baseline);
+    });
 }
 
 
@@ -322,6 +340,8 @@ int main(int argc, const char **argv) {
         std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag]", argv[0]);
         return 1;
     }
+
+    google::InitGoogleLogging(argv[0]);
 
     std::string tag = argv[5];
 
@@ -356,7 +376,7 @@ int main(int argc, const char **argv) {
         });
     }
 
-    Vectors3d lestimates, restimates, lisects, risects;
+    Vectors3d lestimates, restimates, lisects, risects, rback, lback, rbackrefr, lbackrefr;
 
     Plane someplane(
         Vector3d { 0.0, -0.25, -0.5 },
@@ -365,12 +385,21 @@ int main(int argc, const char **argv) {
 
     forward_refract_estimate(warped3D, T, someplane, lestimates, restimates, lisects, risects);
 
+    back_refract(lestimates, risects, T, someplane, rback, &rbackrefr),
+    back_refract(restimates, lisects, Vector3d::Zero(), someplane, lback, &lbackrefr);
+
     nlohmann::json serialized = {
         {"scenepoints", warped3D  },
         {"someplane",   someplane },
         {"lestimates",  lestimates},
         {"restimates",  restimates},
-        {"baseline",    T         }
+        {"baseline",    T         },
+        {"lback",       lback     },
+        {"rback",       rback     },
+        {"lbackrefr",   lbackrefr },
+        {"rbackrefr",   rbackrefr },
+        {"lisects",     lisects   },
+        {"risects",    risects    }
     };
 
     std::println("{}", serialized.dump());
