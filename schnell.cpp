@@ -1,3 +1,4 @@
+#include <ceres/jet_fwd.h>
 #include <iostream>
 #include <algorithm>
 #include <print>
@@ -6,12 +7,17 @@
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
+
 #include <ceres/ceres.h>
+#include <ceres/cost_function.h>
+#include <ceres/types.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/calib3d.hpp>
+
 #include <boost/range/algorithm/transform.hpp>
 #include <boost/range/combine.hpp>
+
 #include <nlohmann/json.hpp>
 
 #pragma GCC diagnostic push
@@ -207,12 +213,47 @@ public:
 };
 
 struct Plane {
-    Vector3d pt;
     Eigen::Vector4d abcd;
-    Plane(const Vector3d &perpvec, const Vector3d &point) : pt(point) {
+    Plane(const Vector3d &perpvec, const Vector3d &point) {
+        // a(x - px) + b(y - py) + c(z - pz) = 0
+        // d = -a*px - b*py - c*pz
         auto norm = perpvec.normalized();
         double d = point.dot(-norm);
         abcd << norm, d;
+    }
+
+    Plane(const double *abcd) : abcd(abcd[0], abcd[1], abcd[2], abcd[3]) { }
+
+    Vector3d some_point() const {
+        Vector3d ret;
+        size_t maxidx;
+
+        abcd.head(3).cwiseAbs().maxCoeff(&maxidx);
+
+        double max = abcd[maxidx];
+
+        if (almost_zero(max))
+            std::println(stderr, "Almost zero maximum coefficient");
+
+        double d = abcd.tail(1).value();
+        switch (maxidx) {
+        case 0: // a
+            ret.y() = ret.z() = 0.0;
+            ret.x() = - d / max;
+            break;
+        case 1: // b
+            ret.x() = ret.z() = 0.0;
+            ret.y() = -d / max;
+            break;
+        case 2: // c
+            ret.x() = ret.y() = 0.0;
+            ret.z() = -d / max;
+            break;
+        default:
+            __builtin_unreachable();
+        }
+
+        return ret;
     }
 
     Eigen::Vector4d intersect_with_(Line &line) const {
@@ -243,7 +284,7 @@ struct Plane {
 
 void to_json(nlohmann::json &j, const Plane &p) {
     j = {
-        {"pt", p.pt},
+        {"pt", p.some_point()},
         {"abcd", p.abcd}
     };
 }
@@ -314,12 +355,11 @@ void back_refract(
     Vectors3d &distances,
     Vectors3d *backrefractions
 ) {
-    Vectors3d backrefractions_;
+    static thread_local Vectors3d backrefractions_;
     if (!backrefractions)
         backrefractions = &backrefractions_;
-    else
-        backrefractions->clear();
     
+    backrefractions->clear();
     distances.clear();
 
     transform(boost::combine(estimates, isects), std::back_inserter(*backrefractions), [&someplane](const auto &tup) {
@@ -334,16 +374,73 @@ void back_refract(
     });
 }
 
+struct NumericCostFunctor {
+    const Vector3d &baseline;
+    const Vectors3d &scene;
+
+    NumericCostFunctor(const Vectors3d &warped, const Vector3d &baseline)
+        : baseline(baseline), scene(warped) { }
+};
+
+struct EstimatedDistanceCostFunctor : public NumericCostFunctor {
+    using NumericCostFunctor::NumericCostFunctor;
+
+    bool operator() (const double *const abcd, double *residuals) const {
+        const Plane someplane(abcd);
+
+        Vectors3d _lestimates, _restimates, _lisects, _risects, _back;
+
+        forward_refract_estimate(scene, baseline, someplane, _lestimates, _restimates, _lisects, _risects);
+
+        const size_t N = _lestimates.size();
+        size_t idx = 0;
+
+        for (size_t i = 0; i < N; ++i) {
+            auto estdist = _lestimates[i] - _restimates[i];
+            for (size_t j = 0; j < 3; j++)
+                residuals[idx++] = estdist.coeff(j);
+        }
+
+        return true;
+    }
+};
+
+template<bool LEFT>
+struct BackrefractionCostFunctor : public NumericCostFunctor {
+    using NumericCostFunctor::NumericCostFunctor;
+
+    bool operator() (const double *const abcd, double *residuals) const {
+        const Plane someplane(abcd);
+
+        Vectors3d _lestimates, _restimates, _lisects, _risects, _back;
+
+        forward_refract_estimate(scene, baseline, someplane, _lestimates, _restimates, _lisects, _risects);
+
+        if constexpr (LEFT)
+            back_refract(_lestimates, _risects, baseline, someplane, _back, nullptr);
+        else
+            back_refract(_restimates, _lisects, Vector3d::Zero(), someplane, _back, nullptr);
+
+        const size_t N = _lestimates.size();
+        size_t idx = 0;
+
+        for (size_t i = 0; i < N; ++i)
+            for (size_t j = 0; j < 3; j++)
+                residuals[idx++] = _back[i].coeff(j);
+
+        return true;
+    }
+};
+
 
 int main(int argc, const char **argv) {
-    if (argc != 6) {
-        std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag]", argv[0]);
+    if (argc != 7) {
+        std::println(std::cerr, "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag] [demo/solve]", argv[0]);
         return 1;
     }
 
-    google::InitGoogleLogging(argv[0]);
-
-    std::string tag = argv[5];
+    std::string tag  = argv[5],
+                mode = argv[6];
 
     cv::Mat_<uint8_t>
         limg = cv::imread(argv[1], cv::IMREAD_GRAYSCALE),
@@ -363,8 +460,8 @@ int main(int argc, const char **argv) {
 
     cv::Mat warped3D_;
     Vectors3d warped3D;
-    Vector3d T { T_.val };
-    T = -T;
+    // - Tx*f / f 
+    Vector3d T { - rP(0, 3) / rP(0, 0), 0.0, 0.0 };
 
     cv::triangulatePoints(lP, rP, ldects, rdects, warped3D_);
 
@@ -382,6 +479,62 @@ int main(int argc, const char **argv) {
         Vector3d { 0.0, -0.25, -0.5 },
         Vector3d { 0.2, -0.05, 0.4 }
     );
+
+    if (mode == "solve") {
+        google::InitGoogleLogging(argv[0]);
+
+        ceres::Problem problem;
+
+        double abcd[] = {
+            someplane.abcd.coeff(0), someplane.abcd.coeff(1), someplane.abcd.coeff(2), someplane.abcd.coeff(3)
+        };
+
+        int n_residuals = warped3D.size() // number of points
+                        * 3;              // 3D
+
+        problem.AddResidualBlock(
+            new ceres::NumericDiffCostFunction<
+                EstimatedDistanceCostFunctor, ceres::NumericDiffMethodType::CENTRAL, ceres::DYNAMIC, 4
+            >(new EstimatedDistanceCostFunctor { warped3D, T } , ceres::Ownership::TAKE_OWNERSHIP, n_residuals),
+            nullptr,
+            abcd
+        );
+
+        problem.AddResidualBlock(
+            new ceres::NumericDiffCostFunction<
+                BackrefractionCostFunctor<true>, ceres::NumericDiffMethodType::CENTRAL, ceres::DYNAMIC, 4
+            >(new BackrefractionCostFunctor<true> { warped3D, T } , ceres::Ownership::TAKE_OWNERSHIP, n_residuals),
+            nullptr,
+            abcd
+        );
+
+        problem.AddResidualBlock(
+            new ceres::NumericDiffCostFunction<
+                BackrefractionCostFunctor<false>, ceres::NumericDiffMethodType::CENTRAL, ceres::DYNAMIC, 4
+            >(new BackrefractionCostFunctor<false> { warped3D, T } , ceres::Ownership::TAKE_OWNERSHIP, n_residuals),
+            nullptr,
+            abcd
+        );
+
+        ceres::Solver::Options solver_opts;
+        solver_opts.minimizer_progress_to_stdout = true;
+
+        std::string error;
+        if (!solver_opts.IsValid(&error)) {
+            std::println(stderr, "{}", error);
+            return 1;
+        }
+
+        ceres::Jet<double, 5> j;
+
+        ceres::Solver::Summary summary;
+
+        ceres::Solve(solver_opts, &problem, &summary);
+
+        std::println("{}", summary.BriefReport());
+
+        someplane = { abcd };
+    }
 
     forward_refract_estimate(warped3D, T, someplane, lestimates, restimates, lisects, risects);
 
@@ -402,5 +555,5 @@ int main(int argc, const char **argv) {
         {"risects",    risects    }
     };
 
-    std::println("{}", serialized.dump());
+    std::println("DELIMITER{}", serialized.dump());
 }

@@ -14,7 +14,8 @@ schnell = subprocess.Popen(
         datadir + '/wasserkiste/no-waves-pattern/0_right.png',
         datadir + '/Kalibrierungen/DISCO3D/Luft/left.yaml',
         datadir + '/Kalibrierungen/DISCO3D/Luft/right.yaml',
-        'april'
+        'april',
+        'solve'
     ],
     stdout = subprocess.PIPE
 )
@@ -25,7 +26,10 @@ if schnell.wait() != 0:
     print("child died:", stderr.decode().strip())
     exit(schnell.returncode)
 
-j = json.loads(stdout)
+stdout, jsondump = stdout.decode().strip().split('DELIMITER')
+
+print(stdout)
+j = json.loads(jsondump)
 
 baseline   = np.array(j["baseline"   ])
 restimates = np.array(j["restimates" ])
@@ -68,10 +72,10 @@ ax.scatter(restimates[:, 0], restimates[:, 1], restimates[:, 2], marker='.', col
 
 for pt in lback:
     xs, ys, zs = zip(np.array([0, 0, 0]), -pt)
-    ax.plot(xs, ys, zs=zs, color='gray', alpha=0.5)
+    ax.plot(xs, ys, zs=zs, color='blue', alpha=0.5)
 for pt in rback:
     xs, ys, zs = zip(baseline, baseline - pt)
-    ax.plot(xs, ys, zs=zs, color='pink', alpha=0.5)
+    ax.plot(xs, ys, zs=zs, color='yellow', alpha=0.5)
 
 for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
     lx, ly, lz = zip(li, li + lbr)
