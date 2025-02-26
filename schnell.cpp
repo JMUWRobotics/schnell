@@ -19,6 +19,7 @@
 #include <boost/range/combine.hpp>
 
 #include <nlohmann/json.hpp>
+#include <utility>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wreorder"
@@ -29,7 +30,9 @@
 #undef BOOST_ALLOW_DEPRECATED_HEADERS
 #pragma GCC diagnostic pop
 
+using Eigen::Vector3;
 using Eigen::Vector3d;
+using Eigen::Vector4;
 using Vectors3d = std::vector<Vector3d>;
 using std::ranges::transform;
 
@@ -170,7 +173,8 @@ auto read_PT(const char* path) {
     return std::make_tuple(P, T);
 }
 
-constexpr double infinity = std::numeric_limits<double>::infinity();
+template<typename T>
+constexpr T infinity = T(std::numeric_limits<double>::infinity());
 
 constexpr bool almost_zero(double x) {
     // https://numpy.org/doc/stable/reference/generated/numpy.isclose.html#
@@ -178,25 +182,23 @@ constexpr bool almost_zero(double x) {
     return std::abs(x) <= atol;
 }
 
+template<typename T>
 class Line {
-    std::optional<Eigen::Matrix4d> _pluecker;
+    std::optional<Eigen::Matrix4<T>> _pluecker;
 
 public:
-    Vector3d dir, pt;
-    Line(const Vector3d& direction, const Vector3d& point):
+    Vector3<T> dir, pt;
+    Line(const Vector3<T>& direction, const Vector3<T>& point):
         dir(direction.normalized()),
         pt(point) {}
-    auto distance_to(const Vector3d& other_pt) const {
+    auto distance_to(const Vector3<T>& other_pt) const {
         auto proj_len = (other_pt - pt).dot(dir);
         auto closest_pt = pt + proj_len * dir;
         return other_pt - closest_pt;
     }
-    const Eigen::Matrix4d& pluecker() {
+    const auto& pluecker() {
         if (!_pluecker.has_value()) {
-            Eigen::Vector4d a, b;
-
-            a << pt + dir, 1.0;
-            b << pt, 1.0;
+            Vector4<T> a = (pt + dir).homogeneous(), b = pt.homogeneous();
 
             _pluecker = a * b.transpose() - b * a.transpose();
         }
@@ -205,20 +207,21 @@ public:
     }
 };
 
+template<typename T>
 struct Plane {
-    Eigen::Vector4d abcd;
-    Plane(const Vector3d& perpvec, const Vector3d& point) {
+    Eigen::Vector4<T> abcd;
+    Plane(const Vector3<T>& perpvec, const Vector3<T>& point) {
         // a(x - px) + b(y - py) + c(z - pz) = 0
         // d = -a*px - b*py - c*pz
         auto norm = perpvec.normalized();
-        double d = point.dot(-norm);
+        T d = point.dot(-norm);
         abcd << norm, d;
     }
 
-    Plane(const double* abcd): abcd(abcd[0], abcd[1], abcd[2], abcd[3]) {}
+    Plane(const T* abcd): abcd(abcd[0], abcd[1], abcd[2], abcd[3]) {}
 
-    Vector3d some_point() const {
-        Vector3d ret;
+    Vector3<T> some_point() const {
+        Vector3<T> ret;
         size_t maxidx;
 
         abcd.head(3).cwiseAbs().maxCoeff(&maxidx);
@@ -249,46 +252,51 @@ struct Plane {
         return ret;
     }
 
-    Eigen::Vector4d intersect_with_(Line& line) const {
+    Eigen::Vector4<T> intersect_with_(Line<T>& line) const {
         return line.pluecker().transpose() * abcd;
     }
 
-    Vector3d intersect_with(Line& line) const {
+    Vector3<T> intersect_with(Line<T>& line) const {
         auto hom = intersect_with_(line);
-        if (almost_zero(hom.w()))
-            return Vector3d { infinity, infinity, infinity };
+        if constexpr (std::is_floating_point_v<T>)
+            if (almost_zero(hom.w()))
+                return Vector3<T> { infinity<T>, infinity<T>, infinity<T> };
         return hom.head(3) / hom.w();
     }
 
-    Vector3d refract(const Line& line, bool backwards = false) const {
-        double r = 1.333; // air -> water
-        Vector3d n = abcd.head(3);
+    Vector3<T> refract(const Line<T>& line, bool backwards = false) const {
+        double r = 1.33; // air -> water
+        Vector3<T> n = abcd.head(3);
 
         // TODO make sense of this
-        if (backwards)
-            n *= -1;
-        else
-            r = 1 / r;
 
-        double c = -n.dot(line.dir);
-        return r * line.dir + n * (r * c - std::sqrt(1 - r * r * (1 - c * c)));
+        if (backwards) {
+            n.x() *= -1.0;
+            n.y() *= -1.0;
+            n.z() *= -1.0;
+        } else
+            r = 1.0 / r;
+
+        T c = -n.dot(line.dir);
+        return r * line.dir + n * (r * c - ceres::sqrt(1.0 - r * r * (1.0 - c * c)));
     }
 };
 
-void to_json(nlohmann::json& j, const Plane& p) {
+void to_json(nlohmann::json& j, const Plane<double>& p) {
     j = { { "pt", p.some_point() }, { "abcd", p.abcd } };
 }
 
+template<typename T>
 void forward_refract_estimate(
-    const Vector3d& pt,
-    const Vector3d& baseline,
-    const Plane& plane,
-    Vector3d& lestimate,
-    Vector3d& restimate,
-    Vector3d& lisect,
-    Vector3d& risect
+    const Vector3<T>& pt,
+    const Vector3<T>& baseline,
+    const Plane<T>& plane,
+    Vector3<T>& lestimate,
+    Vector3<T>& restimate,
+    Vector3<T>& lisect,
+    Vector3<T>& risect
 ) {
-    Line lline(pt, Vector3d::Zero()), rline(pt - baseline, baseline);
+    Line<T> lline(pt, Vector3d::Zero().cast<T>()), rline(pt - baseline, baseline);
 
     lisect = plane.intersect_with(lline);
     risect = plane.intersect_with(rline);
@@ -303,43 +311,45 @@ void forward_refract_estimate(
     restimate = lrefrplane.intersect_with(rrefrline);
 }
 
+template<typename T>
 void back_refract(
-    const Vector3d& estimate,
-    const Vector3d& isect,
-    const Vector3d& baseline,
-    const Plane& someplane,
-    Vector3d& distance,
-    Vector3d* backrefraction
+    const Vector3<T>& estimate,
+    const Vector3<T>& isect,
+    const Vector3<T>& baseline,
+    const Plane<T>& someplane,
+    Vector3<T>& distance,
+    Vector3<T>* backrefraction
 ) {
-    static thread_local Vector3d backrefraction_;
+    static thread_local Vector3<T> backrefraction_;
     if (!backrefraction)
         backrefraction = &backrefraction_;
 
-    *backrefraction = someplane.refract(Line { isect - estimate, estimate }, true);
+    *backrefraction = someplane.refract(Line<T> { isect - estimate, estimate }, true);
 
     distance = Line(*backrefraction, isect).distance_to(baseline);
 }
 
-struct NumericCostFunctor {
+struct MyCostFunctor {
     const Vector3d& baseline;
     const Vector3d& scene;
 
-    NumericCostFunctor(const Vector3d& warped, const Vector3d& baseline):
+    MyCostFunctor(const Vector3d& warped, const Vector3d& baseline):
         baseline(baseline),
         scene(warped) {}
 };
 
-struct EstimatedDistanceCostFunctor: public NumericCostFunctor {
-    using NumericCostFunctor::NumericCostFunctor;
+struct EstimatedDistanceCostFunctor: public MyCostFunctor {
+    using MyCostFunctor::MyCostFunctor;
 
-    bool operator()(const double* const abcd, double* residuals) const {
+    template<typename T>
+    bool operator()(const T* const abcd, T* residuals) const {
         const Plane someplane(abcd);
 
-        Vector3d _lestimates, _restimates, _lisects, _risects, _back;
+        Vector3<T> _lestimates, _restimates, _lisects, _risects, _back;
 
-        forward_refract_estimate(
-            scene,
-            baseline,
+        forward_refract_estimate<T>(
+            scene.cast<T>(),
+            baseline.cast<T>(),
             someplane,
             _lestimates,
             _restimates,
@@ -347,7 +357,7 @@ struct EstimatedDistanceCostFunctor: public NumericCostFunctor {
             _risects
         );
 
-        Vector3d distance = _lestimates - _restimates;
+        Vector3<T> distance = _lestimates - _restimates;
 
         residuals[0] = distance.x();
         residuals[1] = distance.y();
@@ -358,17 +368,18 @@ struct EstimatedDistanceCostFunctor: public NumericCostFunctor {
 };
 
 template<bool LEFT>
-struct BackrefractionCostFunctor: public NumericCostFunctor {
-    using NumericCostFunctor::NumericCostFunctor;
+struct BackrefractionCostFunctor: public MyCostFunctor {
+    using MyCostFunctor::MyCostFunctor;
 
-    bool operator()(const double* const abcd, double* residuals) const {
+    template<typename T>
+    bool operator()(const T* const abcd, T* residuals) const {
         const Plane someplane(abcd);
 
-        Vector3d _lestimates, _restimates, _lisects, _risects, _back;
+        Vector3<T> _lestimates, _restimates, _lisects, _risects, _back;
 
-        forward_refract_estimate(
-            scene,
-            baseline,
+        forward_refract_estimate<T>(
+            scene.cast<T>(),
+            baseline.cast<T>(),
             someplane,
             _lestimates,
             _restimates,
@@ -377,9 +388,16 @@ struct BackrefractionCostFunctor: public NumericCostFunctor {
         );
 
         if constexpr (LEFT)
-            back_refract(_lestimates, _risects, baseline, someplane, _back, nullptr);
+            back_refract<T>(_lestimates, _risects, baseline.cast<T>(), someplane, _back, nullptr);
         else
-            back_refract(_restimates, _lisects, Vector3d::Zero(), someplane, _back, nullptr);
+            back_refract<T>(
+                _restimates,
+                _lisects,
+                Vector3d::Zero().cast<T>(),
+                someplane,
+                _back,
+                nullptr
+            );
 
         residuals[0] = _back.x();
         residuals[1] = _back.y();
@@ -445,11 +463,7 @@ int main(int argc, const char** argv) {
 
         for (const auto& point: warped3D) {
             problem.AddResidualBlock(
-                new ceres::NumericDiffCostFunction<
-                    EstimatedDistanceCostFunctor,
-                    ceres::NumericDiffMethodType::CENTRAL,
-                    3,
-                    4>(
+                new ceres::AutoDiffCostFunction<EstimatedDistanceCostFunctor, 3, 4>(
                     new EstimatedDistanceCostFunctor { point, T },
                     ceres::Ownership::TAKE_OWNERSHIP
                 ),
@@ -458,11 +472,7 @@ int main(int argc, const char** argv) {
             );
 
             problem.AddResidualBlock(
-                new ceres::NumericDiffCostFunction<
-                    BackrefractionCostFunctor<true>,
-                    ceres::NumericDiffMethodType::CENTRAL,
-                    3,
-                    4>(
+                new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<true>, 3, 4>(
                     new BackrefractionCostFunctor<true> { point, T },
                     ceres::Ownership::TAKE_OWNERSHIP
                 ),
@@ -471,11 +481,7 @@ int main(int argc, const char** argv) {
             );
 
             problem.AddResidualBlock(
-                new ceres::NumericDiffCostFunction<
-                    BackrefractionCostFunctor<false>,
-                    ceres::NumericDiffMethodType::CENTRAL,
-                    3,
-                    4>(
+                new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<false>, 3, 4>(
                     new BackrefractionCostFunctor<false> { point, T },
                     ceres::Ownership::TAKE_OWNERSHIP
                 ),
@@ -507,9 +513,9 @@ int main(int argc, const char** argv) {
     for (const auto& point: warped3D) {
         Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
 
-        forward_refract_estimate(point, T, someplane, lestimate, restimate, lisect, risect);
-        back_refract(lestimate, risect, T, someplane, rback, &rbackrefr);
-        back_refract(restimate, lisect, Vector3d::Zero(), someplane, lback, &lbackrefr);
+        forward_refract_estimate<double>(point, T, someplane, lestimate, restimate, lisect, risect);
+        back_refract<double>(lestimate, risect, T, someplane, rback, &rbackrefr);
+        back_refract<double>(restimate, lisect, Vector3d::Zero(), someplane, lback, &lbackrefr);
 
         lestimates.push_back(lestimate);
         restimates.push_back(restimate);
