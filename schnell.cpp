@@ -261,7 +261,7 @@ struct Plane {
         if constexpr (std::is_floating_point_v<T>)
             if (almost_zero(hom.w()))
                 return Vector3<T> { infinity<T>, infinity<T>, infinity<T> };
-        return hom.head(3) / hom.w();
+        return hom.hnormalized();
     }
 
     Vector3<T> refract(const Line<T>& line, bool backwards = false) const {
@@ -296,7 +296,7 @@ void forward_refract_estimate(
     Vector3<T>& lisect,
     Vector3<T>& risect
 ) {
-    Line<T> lline(pt, Vector3d::Zero().cast<T>()), rline(pt - baseline, baseline);
+    Line<T> lline(pt, Vector3<T>::Zero()), rline(pt - baseline, baseline);
 
     lisect = plane.intersect_with(lline);
     risect = plane.intersect_with(rline);
@@ -393,7 +393,7 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
             back_refract<T>(
                 _restimates,
                 _lisects,
-                Vector3d::Zero().cast<T>(),
+                Vector3<T>::Zero(),
                 someplane,
                 _back,
                 nullptr
