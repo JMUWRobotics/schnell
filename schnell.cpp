@@ -3,7 +3,6 @@
 #include <iostream>
 #include <print>
 #include <set>
-#include <stdexcept>
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
@@ -13,6 +12,7 @@
 #include <ceres/types.h>
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/core/eigen.hpp>
 #include <opencv2/imgcodecs.hpp>
 
 #include <boost/range/algorithm/transform.hpp>
@@ -160,19 +160,6 @@ void detect_cctags(
     intersect_cctag_dects(ld, rd, ldects, rdects);
 }
 
-auto read_PT(const char* path) {
-    cv::FileStorage fs(path, cv::FileStorage::READ);
-
-    cv::Matx34d P;
-    cv::Matx31d T;
-    fs["rect_proj"] >> P;
-    fs["T"] >> T;
-
-    fs.release();
-
-    return std::make_tuple(P, T);
-}
-
 template<typename T>
 constexpr T infinity = T(std::numeric_limits<double>::infinity());
 
@@ -289,14 +276,15 @@ void to_json(nlohmann::json& j, const Plane<double>& p) {
 template<typename T>
 void forward_refract_estimate(
     const Vector3<T>& pt,
-    const Vector3<T>& baseline,
+    const Vector3<T>& T0,
+    const Vector3<T>& T1,
     const Plane<T>& plane,
     Vector3<T>& lestimate,
     Vector3<T>& restimate,
     Vector3<T>& lisect,
     Vector3<T>& risect
 ) {
-    Line<T> lline(pt, Vector3<T>::Zero()), rline(pt - baseline, baseline);
+    Line<T> lline(pt - T0, T0), rline(pt - T1, T1);
 
     lisect = plane.intersect_with(lline);
     risect = plane.intersect_with(rline);
@@ -330,11 +318,12 @@ void back_refract(
 }
 
 struct MyCostFunctor {
-    const Vector3d& baseline;
-    const Vector3d& scene;
+    const Vector3d T0, T1;
+    const Vector3d scene;
 
-    MyCostFunctor(const Vector3d& warped, const Vector3d& baseline):
-        baseline(baseline),
+    MyCostFunctor(const Vector3d& warped, const Vector3d& T0, const Vector3d& T1):
+        T0(T0),
+        T1(T1),
         scene(warped) {}
 };
 
@@ -349,7 +338,8 @@ struct EstimatedDistanceCostFunctor: public MyCostFunctor {
 
         forward_refract_estimate<T>(
             scene.cast<T>(),
-            baseline.cast<T>(),
+            T0.cast<T>(),
+            T1.cast<T>(),
             someplane,
             _lestimates,
             _restimates,
@@ -379,7 +369,8 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
 
         forward_refract_estimate<T>(
             scene.cast<T>(),
-            baseline.cast<T>(),
+            T0.cast<T>(),
+            T1.cast<T>(),
             someplane,
             _lestimates,
             _restimates,
@@ -388,16 +379,9 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
         );
 
         if constexpr (LEFT)
-            back_refract<T>(_lestimates, _risects, baseline.cast<T>(), someplane, _back, nullptr);
+            back_refract<T>(_lestimates, _risects, T0.cast<T>(), someplane, _back, nullptr);
         else
-            back_refract<T>(
-                _restimates,
-                _lisects,
-                Vector3<T>::Zero(),
-                someplane,
-                _back,
-                nullptr
-            );
+            back_refract<T>(_restimates, _lisects, T1.cast<T>(), someplane, _back, nullptr);
 
         residuals[0] = _back.x();
         residuals[1] = _back.y();
@@ -407,47 +391,112 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
     }
 };
 
-int main(int argc, const char** argv) {
-    if (argc != 7) {
-        std::println(
-            std::cerr,
-            "Usage: {} [limg] [rimg] [lcal] [rcal] [april/cctag] [demo/solve]",
-            argv[0]
+constexpr auto camidxs = { 0, 1, 2, 3 };
+struct Combo {
+    const std::tuple<int, int> idxs;
+    cv::Mat i1, i2, d1, d2;
+    cv::Matx33d K1, K2, R;
+    cv::Matx31d T;
+    cv::Matx34d P1, P2;
+    Vector3d Tref;
+    Eigen::Matrix3d Rref;
+
+    Combo() {}
+
+    Combo(int idx1, int idx2, const std::filesystem::path& datapath):
+        idxs(std::make_tuple(idx1, idx2)),
+        Tref(Vector3d::Zero()),
+        Rref(Eigen::Matrix3d::Identity()) {
+        cv::FileStorage fs(
+            datapath / std::format("{}-to-{}.json", idx1, idx2),
+            cv::FileStorage::READ
         );
+
+        fs["K1"] >> K1;
+        fs["K2"] >> K2;
+        fs["d1"] >> d1;
+        fs["d2"] >> d2;
+        fs["R"] >> R;
+        fs["T"] >> T;
+
+        cv::undistort(
+            cv::imread(datapath / std::format("{}.png", idx1), cv::IMREAD_GRAYSCALE),
+            i1,
+            K1,
+            d1
+        );
+        cv::undistort(
+            cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE),
+            i2,
+            K2,
+            d2
+        );
+
+        cv::Matx34d IX1, IX2;
+
+        cv::hconcat(cv::Matx33d::eye(), cv::Vec3d::zeros(), IX1);
+        cv::hconcat(cv::Matx33d::eye(), T, IX2);
+
+        P1 = K1 * cv::Matx33d::eye() * IX1;
+        P2 = K2 * R * IX2;
+    }
+
+    void set_reference_frame(const cv::Matx33d& R, const cv::Matx31d& T) {
+        cv::cv2eigen(R, Rref);
+        cv::cv2eigen(T, Tref);
+    }
+
+    Vectors3d triangulate_into_referece_frame(bool cctags = false) const {
+        std::vector<cv::Vec2d> dect1, dect2;
+        cv::Mat points4d;
+        Vectors3d ret;
+
+        if (cctags)
+            detect_cctags(i1, i2, dect1, dect2);
+        else
+            detect_apriltags(i1, i2, dect1, dect2);
+
+        cv::triangulatePoints(P1, P2, dect1, dect2, points4d);
+
+        for (int col = 0; col < points4d.cols; ++col) {
+            cv::Vec4f hom_pt = points4d.col(col);
+            auto [x, y, z, w] = hom_pt.val;
+            ret.push_back(Rref * Vector3d { x / w, y / w, z / w } + Tref);
+        }
+
+        return ret;
+    }
+};
+
+int main(int argc, const char** argv) {
+    if (argc != 4) {
+        std::println(std::cerr, "Usage: {} [datapath] [april/cctag] [demo/solve]", argv[0]);
         return 1;
     }
 
-    std::string tag = argv[5], mode = argv[6];
+    std::string tag = argv[2], mode = argv[3];
 
-    cv::Mat_<uint8_t> limg = cv::imread(argv[1], cv::IMREAD_GRAYSCALE),
-                      rimg = cv::imread(argv[2], cv::IMREAD_GRAYSCALE);
-
-    std::vector<cv::Vec2d> ldects, rdects;
-    if (tag == "cctag")
-        detect_cctags(limg, rimg, ldects, rdects);
-    else
-        detect_apriltags(limg, rimg, ldects, rdects);
-
-    if (ldects.empty() || rdects.empty())
-        throw std::invalid_argument("No detections");
-
-    auto [lP, _] = read_PT(argv[3]);
-    auto [rP, T_] = read_PT(argv[4]);
-
-    cv::Mat warped3D_;
-    Vectors3d warped3D;
-    // - Tx*f / f
-    Vector3d T { -rP(0, 3) / rP(0, 0), 0.0, 0.0 };
-
-    cv::triangulatePoints(lP, rP, ldects, rdects, warped3D_);
-
-    for (int col = 0; col < warped3D_.cols; ++col) {
-        cv::Vec4f hom_pt = warped3D_.col(col);
-        auto [x, y, z, w] = hom_pt.val;
-        warped3D.push_back(Vector3d { x / w, y / w, z / w });
+    std::map<std::tuple<int, int>, Combo> combos;
+    for (size_t i = 0; i < camidxs.size(); ++i) {
+        for (size_t j = i + 1; j < camidxs.size(); ++j) {
+            Combo combo(i, j, argv[1]);
+            switch (i) {
+                case 0:
+                    break;
+                case 1: {
+                    auto reference = combos[std::make_tuple(0, 1)];
+                    combo.set_reference_frame(reference.R, reference.T);
+                } break;
+                case 2: {
+                    auto reference = combos[std::make_tuple(0, 2)];
+                    combo.set_reference_frame(reference.R, reference.T);
+                } break;
+                default:
+                    __builtin_unreachable();
+            }
+            combos.insert(std::make_pair(std::make_tuple(i, j), std::move(combo)));
+        }
     }
-
-    Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs, lbackrefrs;
 
     Plane someplane(Vector3d { 0.0, -0.25, -0.5 }, Vector3d { 0.2, -0.05, 0.4 });
 
@@ -461,33 +510,41 @@ int main(int argc, const char** argv) {
                           someplane.abcd.coeff(2),
                           someplane.abcd.coeff(3) };
 
-        for (const auto& point: warped3D) {
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<EstimatedDistanceCostFunctor, 3, 4>(
-                    new EstimatedDistanceCostFunctor { point, T },
-                    ceres::Ownership::TAKE_OWNERSHIP
-                ),
-                nullptr,
-                abcd
-            );
+        for (const auto& [_, combo]: combos) {
+            auto warped3D = combo.triangulate_into_referece_frame();
 
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<true>, 3, 4>(
-                    new BackrefractionCostFunctor<true> { point, T },
-                    ceres::Ownership::TAKE_OWNERSHIP
-                ),
-                nullptr,
-                abcd
-            );
+            Vector3d T0 = combo.Tref, T1;
+            cv::cv2eigen(combo.T, T1);
+            T1 += combo.Tref;
 
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<false>, 3, 4>(
-                    new BackrefractionCostFunctor<false> { point, T },
-                    ceres::Ownership::TAKE_OWNERSHIP
-                ),
-                nullptr,
-                abcd
-            );
+            for (const auto& point: warped3D) {
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<EstimatedDistanceCostFunctor, 3, 4>(
+                        new EstimatedDistanceCostFunctor { point, T0, T1 },
+                        ceres::Ownership::TAKE_OWNERSHIP
+                    ),
+                    nullptr,
+                    abcd
+                );
+
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<true>, 3, 4>(
+                        new BackrefractionCostFunctor<true> { point, T0, T1 },
+                        ceres::Ownership::TAKE_OWNERSHIP
+                    ),
+                    nullptr,
+                    abcd
+                );
+
+                problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<BackrefractionCostFunctor<false>, 3, 4>(
+                        new BackrefractionCostFunctor<false> { point, T0, T1 },
+                        ceres::Ownership::TAKE_OWNERSHIP
+                    ),
+                    nullptr,
+                    abcd
+                );
+            }
         }
 
         ceres::Solver::Options solver_opts;
@@ -510,10 +567,18 @@ int main(int argc, const char** argv) {
         someplane = { abcd };
     }
 
+    Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs, lbackrefrs;
+
+    Combo firstcombo = combos[std::make_tuple(0, 1)];
+    auto warped3D = firstcombo.triangulate_into_referece_frame();
+    Vector3d T;
+    cv::cv2eigen(firstcombo.T, T);
+
     for (const auto& point: warped3D) {
         Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
 
-        forward_refract_estimate<double>(point, T, someplane, lestimate, restimate, lisect, risect);
+        forward_refract_estimate<
+            double>(point, Vector3d::Zero(), T, someplane, lestimate, restimate, lisect, risect);
         back_refract<double>(lestimate, risect, T, someplane, rback, &rbackrefr);
         back_refract<double>(restimate, lisect, Vector3d::Zero(), someplane, lback, &lbackrefr);
 

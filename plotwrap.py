@@ -5,17 +5,14 @@ import numpy as np
 import os
 from matplotlib import pyplot as plt
 
-datadir = os.environ["HOME"] + '/Daten'
+datadir = os.environ["HOME"] + '/Daten/wasserkiste/foureyes/april'
 
 schnell = subprocess.Popen(
     [
         'builddir/schnell',
-        datadir + '/wasserkiste/no-waves-pattern/0_left.png',
-        datadir + '/wasserkiste/no-waves-pattern/0_right.png',
-        datadir + '/Kalibrierungen/DISCO3D/Luft/left.yaml',
-        datadir + '/Kalibrierungen/DISCO3D/Luft/right.yaml',
+        datadir,
         'april',
-        'solve'
+        'demo'
     ],
     stdout = subprocess.PIPE
 )
@@ -71,13 +68,16 @@ ax.scatter(lestimates[:, 0], lestimates[:, 1], lestimates[:, 2], marker='.', col
 ax.scatter(restimates[:, 0], restimates[:, 1], restimates[:, 2], marker='.', color='cyan', label='estimates, right')
 
 for pt in lback:
+    if (pt == None).any(): continue
     xs, ys, zs = zip(np.array([0, 0, 0]), -pt)
     ax.plot(xs, ys, zs=zs, color='blue', alpha=0.5)
 for pt in rback:
+    if (pt == None).any(): continue
     xs, ys, zs = zip(baseline, baseline - pt)
     ax.plot(xs, ys, zs=zs, color='yellow', alpha=0.5)
 
 for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
+    if (lbr == None).any() or (rbr == None).any() or (li == None).any() or (ri == None).any(): continue
     lx, ly, lz = zip(li, li + lbr)
     ax.plot(lx, ly, zs=lz, color='gray', alpha=0.25)
 
