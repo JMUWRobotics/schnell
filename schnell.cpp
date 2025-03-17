@@ -435,7 +435,7 @@ struct Combo {
         cv::Matx34d IX1, IX2;
 
         cv::hconcat(cv::Matx33d::eye(), cv::Vec3d::zeros(), IX1);
-        cv::hconcat(cv::Matx33d::eye(), T, IX2);
+        cv::hconcat(cv::Matx33d::eye(), -T, IX2);
 
         P1 = K1 * cv::Matx33d::eye() * IX1;
         P2 = K2 * R * IX2;
@@ -498,7 +498,7 @@ int main(int argc, const char** argv) {
         }
     }
 
-    Plane someplane(Vector3d { 0.0, -0.25, -0.5 }, Vector3d { 0.2, -0.05, 0.4 });
+    Plane someplane(Vector3d { 0.0, -0.25, -0.2 }, Vector3d { 0, 0, 0.65 });
 
     if (mode == "solve") {
         google::InitGoogleLogging(argv[0]);
