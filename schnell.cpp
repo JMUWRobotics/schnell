@@ -138,6 +138,7 @@ void detect_apriltags(
 
     std::set<int> ids;
 
+    apriltag_detector_remove_family(d, f);
     tag36h11_destroy(f);
     apriltag_detector_destroy(d);
 
