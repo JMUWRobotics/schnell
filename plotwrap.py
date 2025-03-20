@@ -20,7 +20,7 @@ schnell = subprocess.Popen(
 stdout, stderr = schnell.communicate()
 
 if schnell.wait() != 0:
-    print("child died:", stderr.decode().strip())
+    print("child died:", stderr.decode().strip() if stderr else "empty stderr")
     exit(schnell.returncode)
 
 stdout, jsondump = stdout.decode().strip().split('DELIMITER')
@@ -28,18 +28,8 @@ stdout, jsondump = stdout.decode().strip().split('DELIMITER')
 print(stdout)
 j = json.loads(jsondump)
 
-baseline   = np.array(j["baseline"   ])
-restimates = np.array(j["restimates" ])
-lestimates = np.array(j["lestimates" ])
-plane_pt   = np.array(j["someplane"  ]["pt"])
-plane_abcd = np.array(j["someplane"  ]["abcd"])
-scenepts   = np.array(j["scenepoints"])
-lback      = np.array(j["lback"      ])
-rback      = np.array(j["rback"      ])
-lbackrefr  = np.array(j["lbackrefr"  ])
-rbackrefr  = np.array(j["rbackrefr"  ])
-lisects    = np.array(j["lisects"    ])
-risects    = np.array(j["risects"    ])
+plane_pt   = np.array(j["someplane"]["pt"])
+plane_abcd = np.array(j["someplane"]["abcd"])
 
 def meshgrid(pt, abcd, xlim, ylim):
     (xlo, xhi), (ylo, yhi) = xlim, ylim
@@ -55,35 +45,63 @@ def meshgrid(pt, abcd, xlim, ylim):
             
     return xx, yy, z
 
-fig = plt.figure(figsize=(20,20))
+fig = plt.figure(figsize=(40,20))
 ax  = fig.add_subplot(projection='3d')
 
 ax.plot_surface(*meshgrid(plane_pt, plane_abcd, (-0.2, 0.5), (-0.2, 0.2)), alpha = 0.2, label='water surface')
 
-ax.scatter(scenepts[:, 0], scenepts[:, 1], scenepts[:, 2], marker='.', color='green', label='correspondence')
-ax.scatter(0, 0, 0, marker='o', color='black', label='left cam')
-ax.scatter(*baseline, marker='o', color='red', label='right cam')
+drawn_cams = set()
 
-ax.scatter(lestimates[:, 0], lestimates[:, 1], lestimates[:, 2], marker='.', color='blue', label='estimates, left')
-ax.scatter(restimates[:, 0], restimates[:, 1], restimates[:, 2], marker='.', color='cyan', label='estimates, right')
+for i, pair in enumerate(j["stereopairs"]):
 
-for pt in lback:
-    if (pt == None).any(): continue
-    xs, ys, zs = zip(np.array([0, 0, 0]), -pt)
-    ax.plot(xs, ys, zs=zs, color='blue', alpha=0.5)
-for pt in rback:
-    if (pt == None).any(): continue
-    xs, ys, zs = zip(baseline, baseline - pt)
-    ax.plot(xs, ys, zs=zs, color='yellow', alpha=0.5)
+    T0 = np.array(pair["T0"])
+    T1 = np.array(pair["T1"])
 
-for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
-    if (lbr == None).any() or (rbr == None).any() or (li == None).any() or (ri == None).any(): continue
-    lx, ly, lz = zip(li, li + lbr)
-    ax.plot(lx, ly, zs=lz, color='gray', alpha=0.25)
+    idx1, idx2 = pair["idxs"]
+    tag = f"({idx1} $\\rightarrow$ {idx2})"
 
-    rx, ry, rz = zip(ri, ri + rbr)
-    ax.plot(rx, ry, zs=rz, color='pink', alpha=0.25)
+    restimates = np.array(pair["restimates" ])
+    lestimates = np.array(pair["lestimates" ])
+    scenepts   = np.array(pair["scenepoints"])
+    lback      = np.array(pair["lback"      ])
+    rback      = np.array(pair["rback"      ])
+    lbackrefr  = np.array(pair["lbackrefr"  ])
+    rbackrefr  = np.array(pair["rbackrefr"  ])
+    lisects    = np.array(pair["lisects"    ])
+    risects    = np.array(pair["risects"    ])
 
+    ax.scatter(scenepts[:, 0], scenepts[:, 1], scenepts[:, 2], marker='.', label=tag + ' correspondence')
+    if idx1 not in drawn_cams:
+        ax.scatter(*T0, marker='o', label=f'cam {idx1}')
+        drawn_cams.add(idx1)
+    if idx2 not in drawn_cams:
+        ax.scatter(*T1, marker='o', label=f'cam {idx2}')
+        drawn_cams.add(idx2)
+
+    ax.scatter(lestimates[:, 0], lestimates[:, 1], lestimates[:, 2], marker='.', label=tag + ' estimates, left')
+    ax.scatter(restimates[:, 0], restimates[:, 1], restimates[:, 2], marker='.', label=tag + ' estimates, right')
+
+    for pt in lback:
+        if (pt == None).any(): continue
+        xs, ys, zs = zip(T0, T0-pt)
+        ax.plot(xs, ys, zs=zs, color='blue', alpha=0.5)
+    for pt in rback:
+        if (pt == None).any(): continue
+        xs, ys, zs = zip(T1, T1-pt)
+        ax.plot(xs, ys, zs=zs, color='yellow', alpha=0.5)
+
+    for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
+        if (lbr == None).any() or (rbr == None).any() or (li == None).any() or (ri == None).any(): continue
+        lx, ly, lz = zip(li, li + lbr)
+        ax.plot(lx, ly, zs=lz, color='gray', alpha=0.25)
+
+        rx, ry, rz = zip(ri, ri + rbr)
+        ax.plot(rx, ry, zs=rz, color='pink', alpha=0.25)
+
+ax.set_aspect('equal')
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.set_zlabel('z')
 
 plt.legend()
 plt.show()

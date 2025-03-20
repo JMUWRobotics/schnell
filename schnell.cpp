@@ -1,8 +1,7 @@
 #include <algorithm>
-#include <ceres/jet_fwd.h>
 #include <iostream>
+#include <opencv2/core.hpp>
 #include <print>
-#include <set>
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
@@ -16,10 +15,11 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include <boost/range/algorithm/transform.hpp>
-#include <boost/range/combine.hpp>
+
+#include <cxxopts.hpp>
 
 #include <nlohmann/json.hpp>
-#include <utility>
+#include <unistd.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wreorder"
@@ -30,11 +30,48 @@
 #undef BOOST_ALLOW_DEPRECATED_HEADERS
 #pragma GCC diagnostic pop
 
+using Eigen::Matrix3d;
 using Eigen::Vector3;
 using Eigen::Vector3d;
 using Eigen::Vector4;
+using Eigen::Vector4d;
 using Vectors3d = std::vector<Vector3d>;
+using nlohmann::json;
 using std::ranges::transform;
+
+template<typename Type, int Size>
+struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
+    auto format(const Eigen::Vector<Type, Size>& v, std::format_context& ctx) const {
+        return std::formatter<std::string>::format(
+            std::accumulate(
+                std::next(v.begin()),
+                v.end(),
+                '[' + std::to_string(v[0]),
+                [](std::string a, Type x) { return std::move(a) + ',' + std::to_string(x); }
+            ) + ']',
+        ctx);
+    }
+};
+
+std::tuple<Vector3d, std::array<Vector3d, 3>> principal_components(const Vectors3d& vecs) {
+    const Vector3d mean =
+        std::accumulate(vecs.begin(), vecs.end(), Vector3d::Zero().eval()) / vecs.size();
+    const Matrix3d cov = std::accumulate(
+        vecs.begin(),
+        vecs.end(),
+        Matrix3d::Zero().eval(),
+        [&mean](const Matrix3d& cov, const Vector3d& v) -> Matrix3d {
+            Vector3d diff = v - mean;
+            return cov + diff * diff.transpose();
+        }
+    );
+    Eigen::SelfAdjointEigenSolver<Matrix3d> solver(cov);
+    Matrix3d evecs = solver.eigenvectors();
+    return std::make_tuple(
+        mean,
+        std::array<Vector3d, 3> { evecs.col(0), evecs.col(1), evecs.col(2) }
+    );
+}
 
 image_u8_t april_from_mat(const cv::Mat_<uint8_t>& m) {
     return image_u8_t { .width = m.cols, .height = m.rows, .stride = (int)m.step, .buf = m.data };
@@ -164,10 +201,11 @@ void detect_cctags(
 template<typename T>
 constexpr T infinity = T(std::numeric_limits<double>::infinity());
 
-constexpr bool almost_zero(double x) {
+template<typename T>
+constexpr bool almost_zero(T x) {
     // https://numpy.org/doc/stable/reference/generated/numpy.isclose.html#
     constexpr double atol = 1e-08;
-    return std::abs(x) <= atol;
+    return ceres::abs(x) <= atol;
 }
 
 template<typename T>
@@ -179,12 +217,12 @@ public:
     Line(const Vector3<T>& direction, const Vector3<T>& point):
         dir(direction.normalized()),
         pt(point) {}
-    auto distance_to(const Vector3<T>& other_pt) const {
-        auto proj_len = (other_pt - pt).dot(dir);
-        auto closest_pt = pt + proj_len * dir;
+    Vector3<T> distance_to(const Vector3<T>& other_pt) const {
+        T proj_len = (other_pt - pt).dot(dir);
+        Vector3<T> closest_pt = pt + proj_len * dir;
         return other_pt - closest_pt;
     }
-    const auto& pluecker() {
+    const Eigen::Matrix4<T> pluecker() {
         if (!_pluecker.has_value()) {
             Vector4<T> a = (pt + dir).homogeneous(), b = pt.homogeneous();
 
@@ -197,29 +235,47 @@ public:
 
 template<typename T>
 struct Plane {
-    Eigen::Vector4<T> abcd;
+    Vector3<T> abc;
+    T d;
+
+    Plane(): abc(Vector3<T>::Zero()) {}
+
     Plane(const Vector3<T>& perpvec, const Vector3<T>& point) {
         // a(x - px) + b(y - py) + c(z - pz) = 0
         // d = -a*px - b*py - c*pz
-        auto norm = perpvec.normalized();
-        T d = point.dot(-norm);
-        abcd << norm, d;
+        abc = perpvec.normalized();
+        d = point.dot(-abc);
     }
 
-    Plane(const T* abcd): abcd(abcd[0], abcd[1], abcd[2], abcd[3]) {}
+    Plane(const std::vector<T>& perpvec, const std::vector<T>& point):
+        Plane(
+            Vector3<T> { perpvec.at(0), perpvec.at(1), perpvec.at(2) },
+            Vector3<T> { point.at(0), point.at(1), point.at(2) }
+        ) {}
+
+    Plane(T a, T b, T c, T d): abc(a, b, c), d(d) {
+        abc.normalize();
+    }
+
+    Plane(const T* abcd): Plane(abcd[0], abcd[1], abcd[2], abcd[3]) {}
+
+    Plane(const std::vector<T>& abcd): Plane(abcd.at(0), abcd.at(1), abcd.at(2), abcd.at(3)) {}
+
+    Vector4<T> abcd() const {
+        return { abc.x(), abc.y(), abc.z(), d };
+    }
 
     Vector3<T> some_point() const {
         Vector3<T> ret;
         size_t maxidx;
 
-        abcd.head(3).cwiseAbs().maxCoeff(&maxidx);
+        abc.head(3).cwiseAbs().maxCoeff(&maxidx);
 
-        double max = abcd[maxidx];
+        double max = abc[maxidx];
 
         if (almost_zero(max))
             std::println(stderr, "Almost zero maximum coefficient");
 
-        double d = abcd.tail(1).value();
         switch (maxidx) {
             case 0: // a
                 ret.y() = ret.z() = 0.0;
@@ -240,28 +296,27 @@ struct Plane {
         return ret;
     }
 
-    Eigen::Vector4<T> intersect_with_(Line<T>& line) const {
-        return line.pluecker().transpose() * abcd;
+    Vector4<T> intersect_with_(Line<T>& line) const {
+        return line.pluecker().transpose() * abcd();
     }
 
-    Vector3<T> intersect_with(Line<T>& line) const {
-        auto hom = intersect_with_(line);
-        if constexpr (std::is_floating_point_v<T>)
-            if (almost_zero(hom.w()))
-                return Vector3<T> { infinity<T>, infinity<T>, infinity<T> };
-        return hom.hnormalized();
+    bool intersect_with(Line<T>& line, Vector3<T>& intersection) const {
+        Vector4<T> hom = intersect_with_(line);
+        if (almost_zero(hom.w()))
+            return false;
+
+        intersection = hom.hnormalized();
+        return true;
     }
 
     Vector3<T> refract(const Line<T>& line, bool backwards = false) const {
         double r = 1.33; // air -> water
-        Vector3<T> n = abcd.head(3);
+        Vector3<T> n = abc;
 
         // TODO make sense of this
 
         if (backwards) {
-            n.x() *= -1.0;
-            n.y() *= -1.0;
-            n.z() *= -1.0;
+            n = n * -1.0;
         } else
             r = 1.0 / r;
 
@@ -271,11 +326,11 @@ struct Plane {
 };
 
 void to_json(nlohmann::json& j, const Plane<double>& p) {
-    j = { { "pt", p.some_point() }, { "abcd", p.abcd } };
+    j = { { "pt", p.some_point() }, { "abcd", p.abcd() } };
 }
 
 template<typename T>
-void forward_refract_estimate(
+bool forward_refract_estimate(
     const Vector3<T>& pt,
     const Vector3<T>& T0,
     const Vector3<T>& T1,
@@ -287,17 +342,23 @@ void forward_refract_estimate(
 ) {
     Line<T> lline(pt - T0, T0), rline(pt - T1, T1);
 
-    lisect = plane.intersect_with(lline);
-    risect = plane.intersect_with(rline);
+    if (!plane.intersect_with(lline, lisect))
+        return false;
+    if (!plane.intersect_with(rline, risect))
+        return false;
 
-    auto lrefr = plane.refract(lline), rrefr = plane.refract(rline);
+    Vector3<T> lrefr = plane.refract(lline), rrefr = plane.refract(rline);
 
     Plane rrefrplane(rline.dir.cross(rrefr), risect), lrefrplane(lline.dir.cross(lrefr), lisect);
 
     Line lrefrline(lrefr, lisect), rrefrline(rrefr, risect);
 
-    lestimate = rrefrplane.intersect_with(lrefrline);
-    restimate = lrefrplane.intersect_with(rrefrline);
+    if (!rrefrplane.intersect_with(lrefrline, lestimate))
+        return false;
+    if (!lrefrplane.intersect_with(rrefrline, restimate))
+        return false;
+
+    return true;
 }
 
 template<typename T>
@@ -337,7 +398,7 @@ struct EstimatedDistanceCostFunctor: public MyCostFunctor {
 
         Vector3<T> _lestimates, _restimates, _lisects, _risects, _back;
 
-        forward_refract_estimate<T>(
+        bool ok = forward_refract_estimate<T>(
             scene.cast<T>(),
             T0.cast<T>(),
             T1.cast<T>(),
@@ -347,6 +408,9 @@ struct EstimatedDistanceCostFunctor: public MyCostFunctor {
             _lisects,
             _risects
         );
+
+        if (!ok)
+            return false;
 
         Vector3<T> distance = _lestimates - _restimates;
 
@@ -368,7 +432,7 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
 
         Vector3<T> _lestimates, _restimates, _lisects, _risects, _back;
 
-        forward_refract_estimate<T>(
+        bool ok = forward_refract_estimate<T>(
             scene.cast<T>(),
             T0.cast<T>(),
             T1.cast<T>(),
@@ -378,6 +442,9 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
             _lisects,
             _risects
         );
+
+        if (!ok)
+            return false;
 
         if constexpr (LEFT)
             back_refract<T>(_lestimates, _risects, T0.cast<T>(), someplane, _back, nullptr);
@@ -395,19 +462,20 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
 constexpr auto camidxs = { 0, 1, 2, 3 };
 struct Combo {
     const std::tuple<int, int> idxs;
-    cv::Mat i1, i2, d1, d2;
+    const cv::Mat i1, i2;
+    cv::Mat d1, d2;
     cv::Matx33d K1, K2, R;
     cv::Matx31d T;
     cv::Matx34d P1, P2;
-    Vector3d Tref;
-    Eigen::Matrix3d Rref;
+    Eigen::Matrix4d RefTrans;
 
     Combo() {}
 
     Combo(int idx1, int idx2, const std::filesystem::path& datapath):
         idxs(std::make_tuple(idx1, idx2)),
-        Tref(Vector3d::Zero()),
-        Rref(Eigen::Matrix3d::Identity()) {
+        i1(cv::imread(datapath / std::format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
+        i2(cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
+        RefTrans(Eigen::Matrix4d::Identity()) {
         cv::FileStorage fs(
             datapath / std::format("{}-to-{}.json", idx1, idx2),
             cv::FileStorage::READ
@@ -420,67 +488,88 @@ struct Combo {
         fs["R"] >> R;
         fs["T"] >> T;
 
-        cv::undistort(
-            cv::imread(datapath / std::format("{}.png", idx1), cv::IMREAD_GRAYSCALE),
-            i1,
-            K1,
-            d1
-        );
-        cv::undistort(
-            cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE),
-            i2,
-            K2,
-            d2
-        );
-
-        cv::Matx34d IX1, IX2;
-
-        cv::hconcat(cv::Matx33d::eye(), cv::Vec3d::zeros(), IX1);
-        cv::hconcat(cv::Matx33d::eye(), -T, IX2);
-
-        P1 = K1 * cv::Matx33d::eye() * IX1;
-        P2 = K2 * R * IX2;
+        cv::hconcat(K1, cv::Vec3d::zeros(), P1);
+        {
+            cv::Matx34d RT;
+            cv::hconcat(R, T, RT);
+            P2 = K2 * RT;
+        }
     }
 
     void set_reference_frame(const cv::Matx33d& R, const cv::Matx31d& T) {
-        cv::cv2eigen(R, Rref);
-        cv::cv2eigen(T, Tref);
+        cv::Matx34d upper;
+        cv::Matx44d refTrans;
+        cv::hconcat(R, T, upper);
+        cv::vconcat(upper, cv::Matx14d(0, 0, 0, 1), refTrans);
+        cv::cv2eigen(refTrans.inv(), RefTrans);
+    }
+
+    std::tuple<Vector3d, Vector3d> get_baseline_in_reference_frame() const {
+        cv::Matx31d cv_baseline_local = -R.t() * T;
+        Vector3d eigen_baseline_local;
+
+        cv::cv2eigen(cv_baseline_local, eigen_baseline_local);
+        return std::make_tuple(
+            (RefTrans * Vector3d::Zero().homogeneous()).hnormalized(),
+            (RefTrans * eigen_baseline_local.homogeneous()).hnormalized()
+        );
     }
 
     Vectors3d triangulate_into_referece_frame(bool cctags = false) const {
-        std::vector<cv::Vec2d> dect1, dect2;
+        std::vector<cv::Vec2d> dect1_distorted, dect1, dect2_distorted, dect2;
         cv::Mat points4d;
         Vectors3d ret;
 
         if (cctags)
-            detect_cctags(i1, i2, dect1, dect2);
+            detect_cctags(i1, i2, dect1_distorted, dect2_distorted);
         else
-            detect_apriltags(i1, i2, dect1, dect2);
+            detect_apriltags(i1, i2, dect1_distorted, dect2_distorted);
+
+        cv::undistortImagePoints(dect1_distorted, dect1, K1, d1);
+        cv::undistortImagePoints(dect2_distorted, dect2, K2, d2);
 
         cv::triangulatePoints(P1, P2, dect1, dect2, points4d);
 
         for (int col = 0; col < points4d.cols; ++col) {
             cv::Vec4f hom_pt = points4d.col(col);
             auto [x, y, z, w] = hom_pt.val;
-            ret.push_back(Rref * Vector3d { x / w, y / w, z / w } + Tref);
+            // TODO
+            ret.push_back((RefTrans * Vector4d { x, y, z, w }).hnormalized());
         }
 
         return ret;
     }
 };
 
+template<typename TVal>
+using StereoMap = std::map<std::tuple<int, int>, TVal>;
+
 int main(int argc, const char** argv) {
-    if (argc != 4) {
-        std::println(std::cerr, "Usage: {} [datapath] [april/cctag] [demo/solve]", argv[0]);
-        return 1;
-    }
+    // clang-format off
 
-    std::string tag = argv[2], mode = argv[3];
+    cxxopts::Options options("schnell");
+    options.add_options()
+        ("datapath", "path to data", cxxopts::value<std::string>())
+        ("abcd", "initial plane values", cxxopts::value<std::vector<double>>())
+        ("point", "xyz point on plane", cxxopts::value<std::vector<double>>())
+        ("perpvec", "xyz components of vector perpendicular to plane", cxxopts::value<std::vector<double>>())
+        ("cctag", "enable cctag detection")
+        ("solve", "runs solver");
 
-    std::map<std::tuple<int, int>, Combo> combos;
+    options.parse_positional({"datapath"});
+
+    const auto args = options.parse(argc, argv);
+
+    // clang-format on
+
+    bool cctag = args.count("cctag"), solve = args.count("solve");
+
+    std::string datapath = args["datapath"].as<std::string>();
+
+    StereoMap<Combo> combos;
     for (size_t i = 0; i < camidxs.size(); ++i) {
         for (size_t j = i + 1; j < camidxs.size(); ++j) {
-            Combo combo(i, j, argv[1]);
+            Combo combo(i, j, datapath);
             switch (i) {
                 case 0:
                     break;
@@ -499,26 +588,69 @@ int main(int argc, const char** argv) {
         }
     }
 
-    Plane someplane(Vector3d { 0.0, -0.25, -0.2 }, Vector3d { 0, 0, 0.65 });
+    bool guess_plane = !(args.count("abcd") || (args.count("perpvec") && args.count("point")));
 
-    if (mode == "solve") {
+    Plane<double> someplane;
+
+    StereoMap<Vectors3d> triangulations;
+    StereoMap<std::tuple<Vector3d, Vector3d>> camera_positions;
+    for (const auto& [key, combo]: combos) {
+        camera_positions[key] = combo.get_baseline_in_reference_frame();
+        triangulations[key] = combo.triangulate_into_referece_frame(cctag);
+    }
+
+    if (guess_plane) {
+        Vectors3d pattern_center_vectors;
+        Vectors3d pattern_evecs;
+
+        for (const auto& [key, combo]: combos) {
+            const auto& [T0, T1] = camera_positions[key];
+            const auto [mean, evecs] = principal_components(triangulations[key]);
+            pattern_center_vectors.push_back(mean - T0);
+            pattern_center_vectors.push_back(mean - T1);
+            pattern_evecs.push_back(evecs[0]);
+        }
+
+        Vector3d mean_pcv = std::accumulate(
+                                pattern_center_vectors.cbegin(),
+                                pattern_center_vectors.cend(),
+                                Vector3d::Zero().eval()
+                            )
+            / pattern_center_vectors.size();
+        Vector3d mean_evec =
+            std::accumulate(pattern_evecs.cbegin(), pattern_evecs.cend(), Vector3d::Zero().eval())
+            / pattern_evecs.size();
+
+        someplane = Plane((-mean_evec).eval(), (mean_pcv / 2).eval());
+    } else if (args.count("abcd")) {
+        someplane = Plane(args["abcd"].as<std::vector<double>>());
+    } else if (args.count("perpvec") && args.count("point")) {
+        someplane = Plane(
+            args["perpvec"].as<std::vector<double>>(),
+            args["point"].as<std::vector<double>>()
+        );
+    } else
+        throw std::invalid_argument("bad args");
+
+    std::println("{}", someplane.abcd());
+
+    if (solve) {
         google::InitGoogleLogging(argv[0]);
 
         ceres::Problem problem;
 
-        double abcd[] = { someplane.abcd.coeff(0),
-                          someplane.abcd.coeff(1),
-                          someplane.abcd.coeff(2),
-                          someplane.abcd.coeff(3) };
+        auto abcd_vec = someplane.abcd();
+        double abcd[] = { abcd_vec.coeff(0),
+                          abcd_vec.coeff(1),
+                          abcd_vec.coeff(2),
+                          abcd_vec.coeff(3) };
 
-        for (const auto& [_, combo]: combos) {
-            auto warped3D = combo.triangulate_into_referece_frame();
+        auto backrefraction_loss = new ceres::HuberLoss(0.1);
 
-            Vector3d T0 = combo.Tref, T1;
-            cv::cv2eigen(combo.T, T1);
-            T1 += combo.Tref;
+        for (const auto& [key, combo]: combos) {
+            const auto& [T0, T1] = camera_positions[key];
 
-            for (const auto& point: warped3D) {
+            for (const auto& point: triangulations[key]) {
                 problem.AddResidualBlock(
                     new ceres::AutoDiffCostFunction<EstimatedDistanceCostFunctor, 3, 4>(
                         new EstimatedDistanceCostFunctor { point, T0, T1 },
@@ -533,7 +665,7 @@ int main(int argc, const char** argv) {
                         new BackrefractionCostFunctor<true> { point, T0, T1 },
                         ceres::Ownership::TAKE_OWNERSHIP
                     ),
-                    nullptr,
+                    backrefraction_loss,
                     abcd
                 );
 
@@ -542,7 +674,7 @@ int main(int argc, const char** argv) {
                         new BackrefractionCostFunctor<false> { point, T0, T1 },
                         ceres::Ownership::TAKE_OWNERSHIP
                     ),
-                    nullptr,
+                    backrefraction_loss,
                     abcd
                 );
             }
@@ -550,6 +682,15 @@ int main(int argc, const char** argv) {
 
         ceres::Solver::Options solver_opts;
         solver_opts.minimizer_progress_to_stdout = true;
+        solver_opts.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+
+        solver_opts.max_num_iterations = 300;
+        solver_opts.function_tolerance = 1e-30;
+        solver_opts.parameter_tolerance = 1e-15;
+
+        solver_opts.minimizer_type = ceres::MinimizerType::LINE_SEARCH;
+        solver_opts.line_search_direction_type =
+            ceres::LineSearchDirectionType::NONLINEAR_CONJUGATE_GRADIENT;
 
         std::string error;
         if (!solver_opts.IsValid(&error)) {
@@ -563,42 +704,50 @@ int main(int argc, const char** argv) {
 
         ceres::Solve(solver_opts, &problem, &summary);
 
-        std::println("{}", summary.BriefReport());
+        std::println("{}", summary.FullReport());
 
         someplane = { abcd };
     }
 
-    Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs, lbackrefrs;
+    json serialized = { { "someplane", someplane }, { "stereopairs", json::array() } };
 
-    Combo firstcombo = combos[std::make_tuple(0, 1)];
-    auto warped3D = firstcombo.triangulate_into_referece_frame();
-    Vector3d T;
-    cv::cv2eigen(firstcombo.T, T);
+    for (const auto& [_, combo]: combos) {
+        Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs, lbackrefrs;
 
-    for (const auto& point: warped3D) {
-        Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
+        const auto warped3D = combo.triangulate_into_referece_frame(cctag);
+        const auto [T0, T1] = combo.get_baseline_in_reference_frame();
 
-        forward_refract_estimate<
-            double>(point, Vector3d::Zero(), T, someplane, lestimate, restimate, lisect, risect);
-        back_refract<double>(lestimate, risect, T, someplane, rback, &rbackrefr);
-        back_refract<double>(restimate, lisect, Vector3d::Zero(), someplane, lback, &lbackrefr);
+        for (const auto& point: warped3D) {
+            Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
 
-        lestimates.push_back(lestimate);
-        restimates.push_back(restimate);
-        lisects.push_back(lisect);
-        risects.push_back(risect);
-        rbacks.push_back(rback);
-        lbacks.push_back(lback);
-        rbackrefrs.push_back(rbackrefr);
-        lbackrefrs.push_back(lbackrefr);
+            forward_refract_estimate<
+                double>(point, T0, T1, someplane, lestimate, restimate, lisect, risect);
+            back_refract<double>(lestimate, risect, T1, someplane, rback, &rbackrefr);
+            back_refract<double>(restimate, lisect, T0, someplane, lback, &lbackrefr);
+
+            lestimates.push_back(lestimate);
+            restimates.push_back(restimate);
+            lisects.push_back(lisect);
+            risects.push_back(risect);
+            rbacks.push_back(rback);
+            lbacks.push_back(lback);
+            rbackrefrs.push_back(rbackrefr);
+            lbackrefrs.push_back(lbackrefr);
+        }
+
+        serialized["stereopairs"].push_back(json { { "idxs", combo.idxs },
+                                                   { "scenepoints", warped3D },
+                                                   { "lestimates", lestimates },
+                                                   { "restimates", restimates },
+                                                   { "T0", T0 },
+                                                   { "T1", T1 },
+                                                   { "lback", lbacks },
+                                                   { "rback", rbacks },
+                                                   { "lbackrefr", lbackrefrs },
+                                                   { "rbackrefr", rbackrefrs },
+                                                   { "lisects", lisects },
+                                                   { "risects", risects } });
     }
-
-    nlohmann::json serialized = {
-        { "scenepoints", warped3D },  { "someplane", someplane },  { "lestimates", lestimates },
-        { "restimates", restimates }, { "baseline", T },           { "lback", lbacks },
-        { "rback", rbacks },          { "lbackrefr", lbackrefrs }, { "rbackrefr", rbackrefrs },
-        { "lisects", lisects },       { "risects", risects }
-    };
 
     std::println("DELIMITER{}", serialized.dump());
 }
