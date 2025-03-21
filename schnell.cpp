@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <iostream>
 #include <opencv2/core.hpp>
 #include <print>
 
@@ -46,10 +45,11 @@ struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
             std::accumulate(
                 std::next(v.begin()),
                 v.end(),
-                '[' + std::to_string(v[0]),
-                [](std::string a, Type x) { return std::move(a) + ',' + std::to_string(x); }
+                std::format("[{}", v[0]),
+                [](std::string a, const Type& x) { return std::format("{}, {}", std::move(a), x); }
             ) + ']',
-        ctx);
+            ctx
+        );
     }
 };
 
@@ -65,8 +65,7 @@ std::tuple<Vector3d, std::array<Vector3d, 3>> principal_components(const Vectors
             return cov + diff * diff.transpose();
         }
     );
-    Eigen::SelfAdjointEigenSolver<Matrix3d> solver(cov);
-    Matrix3d evecs = solver.eigenvectors();
+    Matrix3d evecs = Eigen::SelfAdjointEigenSolver<Matrix3d>(cov).eigenvectors();
     return std::make_tuple(
         mean,
         std::array<Vector3d, 3> { evecs.col(0), evecs.col(1), evecs.col(2) }
@@ -541,6 +540,23 @@ struct Combo {
     }
 };
 
+class Recorder: public ceres::IterationCallback {
+private:
+    std::vector<Plane<double>> _steps;
+    const double* const abcd;
+
+public:
+    Recorder(const double* abcd): abcd(abcd) {}
+    ceres::CallbackReturnType operator()(const ceres::IterationSummary& _ [[maybe_unused]]
+    ) override {
+        _steps.push_back({ abcd });
+        return ceres::CallbackReturnType::SOLVER_CONTINUE;
+    }
+    auto consume() {
+        return std::move(_steps);
+    }
+};
+
 template<typename TVal>
 using StereoMap = std::map<std::tuple<int, int>, TVal>;
 
@@ -634,6 +650,8 @@ int main(int argc, const char** argv) {
 
     std::println("{}", someplane.abcd());
 
+    std::vector<Plane<double>> steps;
+
     if (solve) {
         google::InitGoogleLogging(argv[0]);
 
@@ -680,11 +698,15 @@ int main(int argc, const char** argv) {
             }
         }
 
-        ceres::Solver::Options solver_opts;
-        solver_opts.minimizer_progress_to_stdout = true;
-        solver_opts.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        auto callback = std::make_unique<Recorder>(abcd);
 
-        solver_opts.max_num_iterations = 300;
+        ceres::Solver::Options solver_opts;
+        solver_opts.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        solver_opts.minimizer_progress_to_stdout = true;
+        solver_opts.update_state_every_iteration = true;
+        solver_opts.callbacks = { callback.get() };
+
+        solver_opts.max_num_iterations = INT_MAX;
         solver_opts.function_tolerance = 1e-30;
         solver_opts.parameter_tolerance = 1e-15;
 
@@ -707,46 +729,59 @@ int main(int argc, const char** argv) {
         std::println("{}", summary.FullReport());
 
         someplane = { abcd };
+        steps = callback->consume();
     }
 
-    json serialized = { { "someplane", someplane }, { "stereopairs", json::array() } };
+    steps.push_back(someplane);
 
-    for (const auto& [_, combo]: combos) {
-        Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs, lbackrefrs;
+    json serialized = {
+        { "steps", json::array() }
+    };
 
-        const auto warped3D = combo.triangulate_into_referece_frame(cctag);
-        const auto [T0, T1] = combo.get_baseline_in_reference_frame();
+    for (size_t i = 0; i < steps.size(); ++i) {
+        const auto& plane = steps[i];
 
-        for (const auto& point: warped3D) {
-            Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
+        serialized["steps"].push_back({ { "plane", plane }, { "stereopairs", json::array() } });
+        auto& stereopairs = serialized["steps"][i]["stereopairs"];
 
-            forward_refract_estimate<
-                double>(point, T0, T1, someplane, lestimate, restimate, lisect, risect);
-            back_refract<double>(lestimate, risect, T1, someplane, rback, &rbackrefr);
-            back_refract<double>(restimate, lisect, T0, someplane, lback, &lbackrefr);
+        for (const auto& [_, combo]: combos) {
+            Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs,
+                lbackrefrs;
 
-            lestimates.push_back(lestimate);
-            restimates.push_back(restimate);
-            lisects.push_back(lisect);
-            risects.push_back(risect);
-            rbacks.push_back(rback);
-            lbacks.push_back(lback);
-            rbackrefrs.push_back(rbackrefr);
-            lbackrefrs.push_back(lbackrefr);
+            const auto warped3D = combo.triangulate_into_referece_frame(cctag);
+            const auto [T0, T1] = combo.get_baseline_in_reference_frame();
+
+            for (const auto& point: warped3D) {
+                Vector3d lestimate, restimate, lisect, risect, rback, lback, rbackrefr, lbackrefr;
+
+                forward_refract_estimate<
+                    double>(point, T0, T1, plane, lestimate, restimate, lisect, risect);
+                back_refract<double>(lestimate, risect, T1, plane, rback, &rbackrefr);
+                back_refract<double>(restimate, lisect, T0, plane, lback, &lbackrefr);
+
+                lestimates.push_back(lestimate);
+                restimates.push_back(restimate);
+                lisects.push_back(lisect);
+                risects.push_back(risect);
+                rbacks.push_back(rback);
+                lbacks.push_back(lback);
+                rbackrefrs.push_back(rbackrefr);
+                lbackrefrs.push_back(lbackrefr);
+            }
+
+            stereopairs.push_back(json { { "idxs", combo.idxs },
+                                         { "scenepoints", warped3D },
+                                         { "lestimates", lestimates },
+                                         { "restimates", restimates },
+                                         { "T0", T0 },
+                                         { "T1", T1 },
+                                         { "lback", lbacks },
+                                         { "rback", rbacks },
+                                         { "lbackrefr", lbackrefrs },
+                                         { "rbackrefr", rbackrefrs },
+                                         { "lisects", lisects },
+                                         { "risects", risects } });
         }
-
-        serialized["stereopairs"].push_back(json { { "idxs", combo.idxs },
-                                                   { "scenepoints", warped3D },
-                                                   { "lestimates", lestimates },
-                                                   { "restimates", restimates },
-                                                   { "T0", T0 },
-                                                   { "T1", T1 },
-                                                   { "lback", lbacks },
-                                                   { "rback", rbacks },
-                                                   { "lbackrefr", lbackrefrs },
-                                                   { "rbackrefr", rbackrefrs },
-                                                   { "lisects", lisects },
-                                                   { "risects", risects } });
     }
 
     std::println("DELIMITER{}", serialized.dump());

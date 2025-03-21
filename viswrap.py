@@ -30,10 +30,8 @@ if schnell.wait() != 0:
 stdout, jsondump = stdout.decode().strip().split('DELIMITER')
 
 print(stdout)
-j = json.loads(jsondump)
-
-plane_pt   = np.array(j["someplane"]["pt"])
-plane_abcd = np.array(j["someplane"]["abcd"])
+data = json.loads(jsondump)
+n_steps = len(data["steps"])
 
 def meshgrid(pt, abcd, xlim, ylim):
     (xlo, xhi), (ylo, yhi) = xlim, ylim
@@ -51,7 +49,8 @@ def meshgrid(pt, abcd, xlim, ylim):
 
 ###
 
-canvas = scene.SceneCanvas(keys='interactive', show=True)
+my_app = app.use_app()
+canvas = scene.SceneCanvas(keys='interactive', show=True, app=my_app)
 view = canvas.central_widget.add_view()
 view.camera = scene.ArcballCamera(fov=0)
 axis = scene.visuals.XYZAxis(
@@ -73,102 +72,121 @@ cam_colors = [
     'k', 'm', 'y', 'c'
 ]
 
-xlim, ylim = np.array([np.inf, -np.inf]), np.array([np.inf, -np.inf])
-plane_n = plane_abcd[:-1]
+draw_idx = 0
+curscene = []
 
-for i, pair in enumerate(j["stereopairs"]):
+def draw(_):
+    global draw_idx
+    global curscene
+    j = data["steps"][draw_idx]
+    plane_pt   = np.array(j["plane"]["pt"])
+    plane_abcd = np.array(j["plane"]["abcd"])
 
-    idx1, idx2 = pair["idxs"]
-    tag = f"({idx1} $\\rightarrow$ {idx2})"
+    draw_idx += 1
 
-    T0 = np.array(pair["T0"])
-    T1 = np.array(pair["T1"])
+    xlim, ylim = np.array([np.inf, -np.inf]), np.array([np.inf, -np.inf])
+    plane_n = plane_abcd[:-1]
 
-    lbackrefr  = np.array(pair["lbackrefr"  ])
-    rbackrefr  = np.array(pair["rbackrefr"  ])
-    lisects    = np.array(pair["lisects"    ])
-    risects    = np.array(pair["risects"    ])
+    for elem in curscene:
+        elem.parent = None
 
-    triangulations = np.array(pair["scenepoints"])
+    curscene.clear()
 
-    # xlim[0] = min(np.min(triangulations[:,0]), xlim[0])
-    # xlim[1] = max(np.max(triangulations[:,0]), xlim[1])
-    # ylim[0] = min(np.min(triangulations[:,1]), ylim[0])
-    # ylim[1] = max(np.max(triangulations[:,1]), ylim[1])
+    for i, pair in enumerate(j["stereopairs"]):
 
-    xlim[0] = min(min((T0 + plane_n)[0], (T1 + plane_n)[0]), xlim[0])
-    xlim[1] = max(max((T0 - plane_n)[0], (T1 - plane_n)[0]), xlim[1])
-    ylim[0] = min(min((T0 + plane_n)[1], (T1 + plane_n)[1]), ylim[0])
-    ylim[1] = max(max((T0 - plane_n)[1], (T1 - plane_n)[1]), ylim[1])
+        idx1, idx2 = pair["idxs"]
+        tag = f"({idx1} $\\rightarrow$ {idx2})"
 
-    scenepoints = scene.visuals.Markers(
-        pos=triangulations,
+        T0 = np.array(pair["T0"])
+        T1 = np.array(pair["T1"])
+
+        lbackrefr  = np.array(pair["lbackrefr"  ])
+        rbackrefr  = np.array(pair["rbackrefr"  ])
+        lisects    = np.array(pair["lisects"    ])
+        risects    = np.array(pair["risects"    ])
+
+        triangulations = np.array(pair["scenepoints"])
+
+        # xlim[0] = min(np.min(triangulations[:,0]), xlim[0])
+        # xlim[1] = max(np.max(triangulations[:,0]), xlim[1])
+        # ylim[0] = min(np.min(triangulations[:,1]), ylim[0])
+        # ylim[1] = max(np.max(triangulations[:,1]), ylim[1])
+
+        xlim[0] = min(min((T0 + plane_n)[0], (T1 + plane_n)[0]), xlim[0])
+        xlim[1] = max(max((T0 - plane_n)[0], (T1 - plane_n)[0]), xlim[1])
+        ylim[0] = min(min((T0 + plane_n)[1], (T1 + plane_n)[1]), ylim[0])
+        ylim[1] = max(max((T0 - plane_n)[1], (T1 - plane_n)[1]), ylim[1])
+
+        curscene.append(scene.visuals.Markers(
+            pos=triangulations,
+            parent=view.scene
+        ))
+        curscene.append(scene.visuals.Markers(
+            pos=np.array(pair["restimates"]),
+            parent=view.scene,
+            face_color='blue'
+        ))
+        curscene.append(scene.visuals.Markers(
+            pos=np.array(pair["lestimates"]),
+            parent=view.scene,
+            face_color='blue'
+        ))
+        curscene.append(scene.visuals.Markers(
+            pos=-np.array(pair["lback"]) + T0,
+            parent=view.scene,
+            size=3.5,
+            edge_width_rel=0.5,
+            edge_color=cam_colors[idx1]
+        ))
+        curscene.append(scene.visuals.Markers(
+            pos=-np.array(pair["rback"]) + T1,
+            parent=view.scene,
+            size=3.5,
+            edge_width_rel=0.5,
+            edge_color=cam_colors[idx2]
+        ))
+        # for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
+        #     scene.visuals.Line(
+        #         pos=(li, li + lbr),
+        #         color=(0.5,0.5,0.5,0.75),
+        #         parent=view.scene
+        #     )
+        #     scene.visuals.Line(
+        #         pos=(ri, ri + rbr),
+        #         color=(0.5,0.5,0.5,0.75),
+        #         parent=view.scene
+        #     )
+        if idx1 not in drawn_cams:
+            cam1 = scene.visuals.Markers(
+                pos=T0.reshape(1, -1),
+                parent=view.scene,
+                face_color=cam_colors[idx1],
+                edge_color='white'
+            )
+            drawn_cams.add(idx1)
+        if idx2 not in drawn_cams:
+            cam2 = scene.visuals.Markers(
+                pos=T1.reshape(1, -1),
+                parent=view.scene,
+                face_color=cam_colors[idx2],
+                edge_color='white'
+            )
+            drawn_cams.add(idx2)
+
+    curscene.append(scene.visuals.Arrow(
+        pos=(
+            plane_pt,
+            plane_pt + plane_n / 8
+        ),
+        parent=view.scene
+    ))
+    plane = scene.visuals.SurfacePlot(
+        *meshgrid(plane_pt, plane_abcd, xlim, ylim),
         parent=view.scene
     )
-    restimates = scene.visuals.Markers(
-        pos=np.array(pair["restimates"]),
-        parent=view.scene,
-        face_color='blue'
-    )
-    lestimates = scene.visuals.Markers(
-        pos=np.array(pair["lestimates"]),
-        parent=view.scene,
-        face_color='blue'
-    )
-    lback = scene.visuals.Markers(
-        pos=-np.array(pair["lback"]) + T0,
-        parent=view.scene,
-        size=3.5,
-        edge_width_rel=0.5,
-        edge_color=cam_colors[idx1]
-    )
-    rback = scene.visuals.Markers(
-        pos=-np.array(pair["rback"]) + T1,
-        parent=view.scene,
-        size=3.5,
-        edge_width_rel=0.5,
-        edge_color=cam_colors[idx2]
-    )
-    # for lbr, rbr, li, ri in zip(lbackrefr, rbackrefr, lisects, risects):
-    #     scene.visuals.Line(
-    #         pos=(li, li + lbr),
-    #         color=(0.5,0.5,0.5,0.75),
-    #         parent=view.scene
-    #     )
-    #     scene.visuals.Line(
-    #         pos=(ri, ri + rbr),
-    #         color=(0.5,0.5,0.5,0.75),
-    #         parent=view.scene
-    #     )
-    if idx1 not in drawn_cams:
-        cam1 = scene.visuals.Markers(
-            pos=T0.reshape(1, -1),
-            parent=view.scene,
-            face_color=cam_colors[idx1],
-            edge_color='white'
-        )
-        drawn_cams.add(idx1)
-    if idx2 not in drawn_cams:
-        cam2 = scene.visuals.Markers(
-            pos=T1.reshape(1, -1),
-            parent=view.scene,
-            face_color=cam_colors[idx2],
-            edge_color='white'
-        )
-        drawn_cams.add(idx2)
-
-normal = scene.visuals.Arrow(
-    pos=(
-        plane_pt,
-        plane_pt + plane_n / 8
-    ),
-    parent=view.scene
-)
-plane = scene.visuals.SurfacePlot(
-    *meshgrid(plane_pt, plane_abcd, xlim, ylim),
-    parent=view.scene
-)
-plane.attach(vp.visuals.filters.Alpha(0.5))
+    plane.attach(vp.visuals.filters.Alpha(0.5))
+    curscene.append(plane)
 
 if __name__ == '__main__':
-    app.run()
+    timer = app.Timer(interval=1, iterations=n_steps, connect=draw, start=True, app=my_app)
+    my_app.run()
