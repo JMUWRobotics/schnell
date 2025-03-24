@@ -6,18 +6,14 @@ from vispy import app, scene
 import subprocess, json
 import numpy as np
 import os
+import sys
 
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
 datadir = os.environ["HOME"] + '/Daten/wasserkiste/foureyes/april'
 
 schnell = subprocess.Popen(
-    [
-        'builddir/schnell',
-        datadir,
-        #'--abcd=1,-0.2319539051171811,-0.8465498185840091,0.32044448656555136'
-        '--solve'
-    ],
+    ['builddir/schnell', datadir] + sys.argv,
     stdout = subprocess.PIPE
 )
 
@@ -31,7 +27,7 @@ stdout, jsondump = stdout.decode().strip().split('DELIMITER')
 
 print(stdout)
 data = json.loads(jsondump)
-n_steps = len(data["steps"])
+steps = data["steps"]
 
 def meshgrid(pt, abcd, xlim, ylim):
     (xlo, xhi), (ylo, yhi) = xlim, ylim
@@ -49,23 +45,19 @@ def meshgrid(pt, abcd, xlim, ylim):
 
 ###
 
-my_app = app.use_app()
-canvas = scene.SceneCanvas(keys='interactive', show=True, app=my_app)
-view = canvas.central_widget.add_view()
-view.camera = scene.ArcballCamera(fov=0)
-axis = scene.visuals.XYZAxis(
-    parent=view.scene,
-    pos=(
-        (-1,-1,-1), (-0.5,-1,-1),
-        (-1,-1,-1), (-1,-0.5,-1),
-        (-1,-1,-1), (-1,-1,-0.5)
-    ),
-    color=(
-        (1, 0, 0, 0.8), (1, 0, 0, 0.8),
-        (0, 1, 0, 0.8), (0, 1, 0, 0.8),
-        (0, 0, 1, 0.8), (0, 0, 1, 0.8)
-    )
-)
+def intersect(abcd, p, n):
+    n = n / np.linalg.norm(n)
+    ax, ay, az = p + n
+    bx, by, bz = p
+    a = np.array([ax, ay, az, 1]).reshape(-1, 1)
+    b = np.array([bx, by, bz, 1]).reshape(-1, 1)
+    pluecker = a @ b.T - b @ a.T
+    x, y, z, w = pluecker.T @ abcd
+
+    if np.isclose(w, 0):
+        return None
+
+    return np.array([x / w, y / w, z / w])
 
 drawn_cams = set()
 cam_colors = [
@@ -78,9 +70,11 @@ curscene = []
 def draw(_):
     global draw_idx
     global curscene
-    j = data["steps"][draw_idx]
+    j = steps[draw_idx]
     plane_pt   = np.array(j["plane"]["pt"])
     plane_abcd = np.array(j["plane"]["abcd"])
+
+    print(draw_idx)
 
     draw_idx += 1
 
@@ -91,6 +85,9 @@ def draw(_):
         elem.parent = None
 
     curscene.clear()
+
+    normals = []
+    means = []
 
     for i, pair in enumerate(j["stereopairs"]):
 
@@ -106,6 +103,16 @@ def draw(_):
         risects    = np.array(pair["risects"    ])
 
         triangulations = np.array(pair["scenepoints"])
+        restimates: np.ndarray = np.array(pair["restimates"])
+        lestimates: np.ndarray = np.array(pair["lestimates"])
+
+        evals, evecs = np.linalg.eig(np.cov(lestimates.T))
+        lnormal = evecs[:, np.argmin(evals)]
+        evals, evecs = np.linalg.eig(np.cov(restimates.T))
+        rnormal = evecs[:, np.argmin(evals)]
+
+        normals.append((lnormal + rnormal) / 2)
+        means.append( (restimates.mean(axis=0) + lestimates.mean(axis=0)) / 2 )
 
         # xlim[0] = min(np.min(triangulations[:,0]), xlim[0])
         # xlim[1] = max(np.max(triangulations[:,0]), xlim[1])
@@ -122,12 +129,12 @@ def draw(_):
             parent=view.scene
         ))
         curscene.append(scene.visuals.Markers(
-            pos=np.array(pair["restimates"]),
+            pos=restimates,
             parent=view.scene,
             face_color='blue'
         ))
         curscene.append(scene.visuals.Markers(
-            pos=np.array(pair["lestimates"]),
+            pos=lestimates,
             parent=view.scene,
             face_color='blue'
         ))
@@ -173,6 +180,14 @@ def draw(_):
             )
             drawn_cams.add(idx2)
 
+    normal = np.sum(normals, axis=0)
+    normal /= np.linalg.norm(normal)
+    mean = np.mean(means, axis=0)
+    isect = intersect(plane_abcd, mean, normal)
+
+    if isect is not None:
+        print(np.linalg.norm( mean - isect ) * 100, "cm")
+
     curscene.append(scene.visuals.Arrow(
         pos=(
             plane_pt,
@@ -187,6 +202,42 @@ def draw(_):
     plane.attach(vp.visuals.filters.Alpha(0.5))
     curscene.append(plane)
 
+my_app = app.use_app()
+timer = app.Timer(connect=draw, app=my_app)
+canvas = scene.SceneCanvas(keys='interactive', show=True, app=my_app)
+view = canvas.central_widget.add_view()
+view.camera = scene.ArcballCamera(fov=0)
+axis = scene.visuals.XYZAxis(
+    parent=view.scene,
+    pos=(
+        (-1,-1,-1), (-0.5,-1,-1),
+        (-1,-1,-1), (-1,-0.5,-1),
+        (-1,-1,-1), (-1,-1,-0.5)
+    ),
+    color=(
+        (1, 0, 0, 0.8), (1, 0, 0, 0.8),
+        (0, 1, 0, 0.8), (0, 1, 0, 0.8),
+        (0, 0, 1, 0.8), (0, 0, 1, 0.8)
+    )
+)
+
+@canvas.events.key_press.connect
+def on_key_press(event: vp.app.KeyEvent):
+    match event.text:
+        case 'r':
+            timer.stop()
+            global draw_idx
+            draw_idx = 0
+            timer.start(iterations=len(steps))
+            print('restart')
+        case 's':
+            if timer.running:
+                timer.stop()
+                print('stop')
+            else:
+                timer.start(timer.interval, timer.max_iterations - timer.iter_count)
+                print('start')
+
 if __name__ == '__main__':
-    timer = app.Timer(interval=1, iterations=n_steps, connect=draw, start=True, app=my_app)
+    timer.start(interval=0.5, iterations=len(steps))
     my_app.run()

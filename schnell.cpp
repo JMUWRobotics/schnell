@@ -1,3 +1,4 @@
+#include "ceres/loss_function.h"
 #include <algorithm>
 #include <opencv2/core.hpp>
 #include <print>
@@ -570,7 +571,9 @@ int main(int argc, const char** argv) {
         ("point", "xyz point on plane", cxxopts::value<std::vector<double>>())
         ("perpvec", "xyz components of vector perpendicular to plane", cxxopts::value<std::vector<double>>())
         ("cctag", "enable cctag detection")
-        ("solve", "runs solver");
+        ("solve", "runs solver")
+        //("huber", "huber loss coefficient", cxxopts::value<double>()->default_value("0.1"))
+        ("lone", "softlone loss coefficient", cxxopts::value<double>()->default_value("0.1"));
 
     options.parse_positional({"datapath"});
 
@@ -663,7 +666,8 @@ int main(int argc, const char** argv) {
                           abcd_vec.coeff(2),
                           abcd_vec.coeff(3) };
 
-        auto backrefraction_loss = new ceres::HuberLoss(0.1);
+        auto backrefraction_loss = new ceres::SoftLOneLoss(args["lone"].as<double>());
+        auto distance_loss = nullptr; // new ceres::HuberLoss(args["huber"].as<double>());
 
         for (const auto& [key, combo]: combos) {
             const auto& [T0, T1] = camera_positions[key];
@@ -674,7 +678,7 @@ int main(int argc, const char** argv) {
                         new EstimatedDistanceCostFunctor { point, T0, T1 },
                         ceres::Ownership::TAKE_OWNERSHIP
                     ),
-                    nullptr,
+                    distance_loss,
                     abcd
                 );
 
@@ -708,11 +712,14 @@ int main(int argc, const char** argv) {
 
         solver_opts.max_num_iterations = INT_MAX;
         solver_opts.function_tolerance = 1e-30;
-        solver_opts.parameter_tolerance = 1e-15;
+        solver_opts.parameter_tolerance = 1e-20;
 
-        solver_opts.minimizer_type = ceres::MinimizerType::LINE_SEARCH;
-        solver_opts.line_search_direction_type =
-            ceres::LineSearchDirectionType::NONLINEAR_CONJUGATE_GRADIENT;
+        // solver_opts.minimizer_type = ceres::MinimizerType::LINE_SEARCH;
+        // solver_opts.line_search_direction_type =
+        //     ceres::LineSearchDirectionType::NONLINEAR_CONJUGATE_GRADIENT;
+
+        solver_opts.minimizer_type = ceres::MinimizerType::TRUST_REGION;
+        //solver_opts.linear_solver_type = ceres::LinearSolverType::DENSE_NORMAL_CHOLESKY;
 
         std::string error;
         if (!solver_opts.IsValid(&error)) {
