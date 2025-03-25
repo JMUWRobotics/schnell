@@ -1,6 +1,6 @@
-#include "ceres/loss_function.h"
 #include <algorithm>
-#include <opencv2/core.hpp>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/highgui.hpp>
 #include <print>
 
 #include <apriltag/apriltag.h>
@@ -11,7 +11,9 @@
 #include <ceres/types.h>
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
 #include <opencv2/core/eigen.hpp>
+#include <opencv2/features2d.hpp>
 #include <opencv2/imgcodecs.hpp>
 
 #include <boost/range/algorithm/transform.hpp>
@@ -196,6 +198,48 @@ void detect_cctags(
     cctag::cctagDetection(rd, 0, 0, rimg, cctp, cctb);
 
     intersect_cctag_dects(ld, rd, ldects, rdects);
+}
+
+void detect_sift(
+    const cv::Mat_<uint8_t>& limg,
+    const cv::Mat_<uint8_t>& rimg,
+    const cv::Mat_<uint8_t>& lmask,
+    const cv::Mat_<uint8_t>& rmask,
+    std::vector<cv::Vec2d>& ldects,
+    std::vector<cv::Vec2d>& rdects
+) {
+    std::vector<cv::KeyPoint> lkp, rkp;
+    cv::Mat ldesc, rdesc;
+    std::vector<std::vector<cv::DMatch>> matches;
+    auto sift = cv::SIFT::create(0, 3, 0.05, 10, 1.6, true);
+    auto matcher = cv::BFMatcher::create(cv::NORM_L2, true);
+
+    sift->detectAndCompute(limg, lmask.empty() ? cv::noArray() : lmask, lkp, ldesc);
+    sift->detectAndCompute(rimg, rmask.empty() ? cv::noArray() : rmask, rkp, rdesc);
+
+    matcher->knnMatch(ldesc, rdesc, matches, 1);
+
+#if 0
+    {
+        cv::Mat drawnMatches;
+        cv::drawMatches(limg, lkp, rimg, rkp, matches, drawnMatches);
+
+        cv::imshow("matches", drawnMatches);
+        cv::waitKey();
+        cv::destroyAllWindows();
+    }
+#endif
+
+    for (const auto& match: matches) {
+        if (match.empty())
+            continue;
+
+        const auto& lpt = lkp[match[0].queryIdx].pt;
+        const auto& rpt = rkp[match[0].trainIdx].pt;
+
+        ldects.push_back({ lpt.x, lpt.y });
+        rdects.push_back({ rpt.x, rpt.y });
+    }
 }
 
 template<typename T>
@@ -459,10 +503,12 @@ struct BackrefractionCostFunctor: public MyCostFunctor {
     }
 };
 
+enum class DetectionType { APRIL, CCTAG, SIFT };
+
 constexpr auto camidxs = { 0, 1, 2, 3 };
 struct Combo {
     const std::tuple<int, int> idxs;
-    const cv::Mat i1, i2;
+    const cv::Mat i1, i2, m1, m2;
     cv::Mat d1, d2;
     cv::Matx33d K1, K2, R;
     cv::Matx31d T;
@@ -475,6 +521,8 @@ struct Combo {
         idxs(std::make_tuple(idx1, idx2)),
         i1(cv::imread(datapath / std::format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
         i2(cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
+        m1(cv::imread(datapath / std::format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
+        m2(cv::imread(datapath / std::format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
         RefTrans(Eigen::Matrix4d::Identity()) {
         cv::FileStorage fs(
             datapath / std::format("{}-to-{}.json", idx1, idx2),
@@ -515,15 +563,22 @@ struct Combo {
         );
     }
 
-    Vectors3d triangulate_into_referece_frame(bool cctags = false) const {
+    Vectors3d triangulate_into_referece_frame(DetectionType dtype) const {
         std::vector<cv::Vec2d> dect1_distorted, dect1, dect2_distorted, dect2;
         cv::Mat points4d;
         Vectors3d ret;
 
-        if (cctags)
-            detect_cctags(i1, i2, dect1_distorted, dect2_distorted);
-        else
-            detect_apriltags(i1, i2, dect1_distorted, dect2_distorted);
+        switch (dtype) {
+            case DetectionType::APRIL:
+                detect_apriltags(i1, i2, dect1_distorted, dect2_distorted);
+                break;
+            case DetectionType::CCTAG:
+                detect_cctags(i1, i2, dect1_distorted, dect2_distorted);
+                break;
+            case DetectionType::SIFT:
+                detect_sift(i1, i2, m1, m2, dect1_distorted, dect2_distorted);
+                break;
+        }
 
         cv::undistortImagePoints(dect1_distorted, dect1, K1, d1);
         cv::undistortImagePoints(dect2_distorted, dect2, K2, d2);
@@ -570,7 +625,7 @@ int main(int argc, const char** argv) {
         ("abcd", "initial plane values", cxxopts::value<std::vector<double>>())
         ("point", "xyz point on plane", cxxopts::value<std::vector<double>>())
         ("perpvec", "xyz components of vector perpendicular to plane", cxxopts::value<std::vector<double>>())
-        ("cctag", "enable cctag detection")
+        ("sift", "enable sift detection")
         ("solve", "runs solver")
         //("huber", "huber loss coefficient", cxxopts::value<double>()->default_value("0.1"))
         ("lone", "softlone loss coefficient", cxxopts::value<double>()->default_value("0.1"));
@@ -581,7 +636,8 @@ int main(int argc, const char** argv) {
 
     // clang-format on
 
-    bool cctag = args.count("cctag"), solve = args.count("solve");
+    bool solve = args.count("solve");
+    DetectionType detection_type = args.count("sift") ? DetectionType::SIFT : DetectionType::APRIL;
 
     std::string datapath = args["datapath"].as<std::string>();
 
@@ -615,7 +671,7 @@ int main(int argc, const char** argv) {
     StereoMap<std::tuple<Vector3d, Vector3d>> camera_positions;
     for (const auto& [key, combo]: combos) {
         camera_positions[key] = combo.get_baseline_in_reference_frame();
-        triangulations[key] = combo.triangulate_into_referece_frame(cctag);
+        triangulations[key] = combo.triangulate_into_referece_frame(detection_type);
     }
 
     if (guess_plane) {
@@ -741,9 +797,7 @@ int main(int argc, const char** argv) {
 
     steps.push_back(someplane);
 
-    json serialized = {
-        { "steps", json::array() }
-    };
+    json serialized = { { "steps", json::array() } };
 
     for (size_t i = 0; i < steps.size(); ++i) {
         const auto& plane = steps[i];
@@ -755,7 +809,7 @@ int main(int argc, const char** argv) {
             Vectors3d lestimates, restimates, lisects, risects, rbacks, lbacks, rbackrefrs,
                 lbackrefrs;
 
-            const auto warped3D = combo.triangulate_into_referece_frame(cctag);
+            const auto warped3D = combo.triangulate_into_referece_frame(detection_type);
             const auto [T0, T1] = combo.get_baseline_in_reference_frame();
 
             for (const auto& point: warped3D) {
