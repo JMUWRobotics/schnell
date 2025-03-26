@@ -43,7 +43,46 @@ def meshgrid(pt, abcd, xlim, ylim):
             
     return xx, yy, z
 
+def circgrid(pt, abcd, scale = 1):
+    randomv = np.random.rand(3)
+    n = abcd[:-1]
+    print(randomv, n)
+    v = np.cross(n, randomv)
+    v /= np.linalg.norm(v)
+
+    xs, ys, zs = [], [], []
+    
+    for i in np.linspace(0, np.pi, 34):
+        rv = v * np.cos(i) + np.cross(n, v) * np.sin(i) + n * ( n.T @ v ) * (1 - np.cos(i))
+        rv *= scale
+        x, y, z = pt + rv
+        xs.append(x)
+        ys.append(y)
+        zs.append(z)
+        print(x, y, z)
+    
+    return np.array(xs), np.array(ys), np.array(zs)
+
 ###
+
+# https://math.stackexchange.com/a/897677
+def vector_align(a, b):
+    a /= np.linalg.norm(a)
+    b /= np.linalg.norm(b)
+    d = np.dot(a, b)
+    c = np.linalg.norm(np.cross(a, b))
+    G = np.array([
+        [d, -c, 0],
+        [c,  d, 0],
+        [0,  0, 1]
+    ])
+    u = np.dot(a, b)*a
+    v = b - u
+    u /= np.linalg.norm(u)
+    v /= np.linalg.norm(v)
+    w = np.cross(u, v)
+    F_1 = np.hstack((u.reshape(3, 1), v.reshape(3, 1), w.reshape(3, 1)))
+    return F_1 @ G @ np.linalg.inv(F_1)
 
 def intersect(abcd, p, n):
     n = n / np.linalg.norm(n)
@@ -195,10 +234,20 @@ def draw(_):
         ),
         parent=view.scene
     ))
-    plane = scene.visuals.SurfacePlot(
-        *meshgrid(plane_pt, plane_abcd, xlim, ylim),
+    # xx, yy, zz = circgrid(plane_pt, plane_abcd)
+    # plane = scene.visuals.SurfacePlot(
+    #     x=xx, y=yy, z=zz,
+    #     parent=view.scene
+    # )
+    plane = scene.visuals.Plane(
+        direction='+x',
         parent=view.scene
     )
+    plane.transform = vp.scene.ChainTransform(
+        vp.scene.STTransform(translate=plane_pt),
+        vp.scene.MatrixTransform(np.vstack((np.hstack((vector_align([1, 0, 0], plane_n), np.zeros((3,1)))), np.array([0, 0, 0, 1]))))
+    )
+
     plane.attach(vp.visuals.filters.Alpha(0.5))
     curscene.append(plane)
 
