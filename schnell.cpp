@@ -219,17 +219,6 @@ void detect_sift(
 
     matcher->knnMatch(ldesc, rdesc, matches, 1);
 
-#if 0
-    {
-        cv::Mat drawnMatches;
-        cv::drawMatches(limg, lkp, rimg, rkp, matches, drawnMatches);
-
-        cv::imshow("matches", drawnMatches);
-        cv::waitKey();
-        cv::destroyAllWindows();
-    }
-#endif
-
     for (const auto& match: matches) {
         if (match.empty())
             continue;
@@ -239,6 +228,19 @@ void detect_sift(
 
         ldects.push_back({ lpt.x, lpt.y });
         rdects.push_back({ rpt.x, rpt.y });
+    }
+
+    std::vector<char> mask;
+    auto homography = cv::findHomography(ldects, rdects, cv::RANSAC, 3, mask);
+
+    if (homography.empty())
+        throw std::runtime_error("no homography!");
+
+    for (ssize_t i = mask.size() - 1; i >= 0; --i) {
+        if (!mask[i]) {
+            ldects.erase(ldects.begin() + i);
+            rdects.erase(rdects.begin() + i);
+        }
     }
 }
 
@@ -287,6 +289,7 @@ struct Plane {
     Plane(const Vector3<T>& perpvec, const Vector3<T>& point) {
         // a(x - px) + b(y - py) + c(z - pz) = 0
         // d = -a*px - b*py - c*pz
+        // ax + by + cz + (-a*px -b*py -c*pz) = 0
         abc = perpvec.normalized();
         d = point.dot(-abc);
     }
@@ -523,7 +526,8 @@ struct Combo {
         i2(cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
         m1(cv::imread(datapath / std::format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
         m2(cv::imread(datapath / std::format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
-        RefTrans(Eigen::Matrix4d::Identity()) {
+        RefTrans(Eigen::Matrix4d::Identity())
+    {
         cv::FileStorage fs(
             datapath / std::format("{}-to-{}.json", idx1, idx2),
             cv::FileStorage::READ
