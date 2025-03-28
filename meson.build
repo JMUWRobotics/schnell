@@ -55,7 +55,7 @@ executable(
         dependency('opencv4'),
         dependency('apriltag'),
         dependency('nlohmann_json'),
-        dependency('fmt'),
+        dependency('fmt', version: '>=11.1.1'),
         dependency('cxxopts'),
         ceres_dep,
         cctag.dependency('CCTag'),

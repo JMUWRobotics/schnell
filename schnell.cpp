@@ -5,7 +5,8 @@
 #if __cplusplus >= 202302L
 #include <print>
 #else
-#include <fmt/core.h> 
+#include <fmt/core.h>
+#include <fmt/format.h>
 #endif
 
 #include <apriltag/apriltag.h>
