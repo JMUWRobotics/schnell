@@ -56,6 +56,7 @@ executable(
         dependency('apriltag'),
         dependency('nlohmann_json'),
         dependency('fmt'),
+        dependency('cxxopts'),
         ceres_dep,
         cctag.dependency('CCTag'),
     ],

@@ -62,6 +62,7 @@ struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
     }
 };
 using std::println;
+using std::format;
 #else
 template<typename Type, int Size>
 struct fmt::formatter<Eigen::Vector<Type, Size>>: fmt::formatter<std::string> {
@@ -78,6 +79,7 @@ struct fmt::formatter<Eigen::Vector<Type, Size>>: fmt::formatter<std::string> {
     }
 };
 using fmt::println;
+using fmt::format;
 #endif
 
 std::tuple<Vector3d, std::array<Vector3d, 3>> principal_components(const Vectors3d& vecs) {
@@ -556,13 +558,13 @@ struct Combo {
 
     Combo(int idx1, int idx2, const std::filesystem::path& datapath):
         idxs(std::make_tuple(idx1, idx2)),
-        i1(cv::imread(datapath / std::format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
-        i2(cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
-        m1(cv::imread(datapath / std::format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
-        m2(cv::imread(datapath / std::format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
+        i1(cv::imread(datapath / format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
+        i2(cv::imread(datapath / format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
+        m1(cv::imread(datapath / format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
+        m2(cv::imread(datapath / format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
         RefTrans(Eigen::Matrix4d::Identity()) {
         cv::FileStorage fs(
-            datapath / std::format("{}-to-{}.json", idx1, idx2),
+            datapath / format("{}-to-{}.json", idx1, idx2),
             cv::FileStorage::READ
         );
 
