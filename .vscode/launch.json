@@ -11,7 +11,8 @@
             "program": "${workspaceFolder}/builddir/schnell",
             "args": [
                 "/home/chris/Daten/wasserkiste/foureyes/april",
-                "--solve"
+                // "--solve",
+                "--sift"
             ],
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "Meson: Build all targets"

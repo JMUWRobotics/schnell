@@ -120,7 +120,8 @@ void intersect_apriltag_dects(
         for (size_t i = 0; i < ids.size(); ++i)
             if (isect.contains(ids[i]))
                 for (int j = 0; j < 4; ++j)
-                    out.push_back({ d[i].p[j][0], d[i].p[j][1] });
+                    out.push_back({ d[i].p[j][0], d[i].p[j][1] }
+                    ); // TODO reason about magic numbers
     };
 
     fill_out(lids, l, lout);
@@ -170,10 +171,8 @@ void detect_apriltags(
 
     image_u8_t lapr = april_from_mat(limg), rapr = april_from_mat(rimg);
 
-    zarray_t *lz = apriltag_detector_detect(d, &lapr), *rz = apriltag_detector_detect(d, &rapr);
-
-    std::vector<apriltag_detection_t> ld = dectvec_from_zarray(std::move(lz)),
-                                      rd = dectvec_from_zarray(std::move(rz));
+    std::vector<apriltag_detection_t> ld = dectvec_from_zarray(apriltag_detector_detect(d, &lapr)),
+                                      rd = dectvec_from_zarray(apriltag_detector_detect(d, &rapr));
 
     std::set<int> ids;
 
@@ -229,6 +228,17 @@ void detect_sift(
         ldects.push_back({ lpt.x, lpt.y });
         rdects.push_back({ rpt.x, rpt.y });
     }
+
+#if 0
+    {
+        cv::Mat drawnMatches;
+        cv::drawMatches(limg, lkp, rimg, rkp, matches, drawnMatches);
+
+        cv::imshow("matches", drawnMatches);
+        cv::waitKey();
+        cv::destroyAllWindows();
+    }
+#endif
 
     std::vector<char> mask;
     auto homography = cv::findHomography(ldects, rdects, cv::RANSAC, 3, mask);
@@ -526,8 +536,7 @@ struct Combo {
         i2(cv::imread(datapath / std::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
         m1(cv::imread(datapath / std::format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
         m2(cv::imread(datapath / std::format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
-        RefTrans(Eigen::Matrix4d::Identity())
-    {
+        RefTrans(Eigen::Matrix4d::Identity()) {
         cv::FileStorage fs(
             datapath / std::format("{}-to-{}.json", idx1, idx2),
             cv::FileStorage::READ
