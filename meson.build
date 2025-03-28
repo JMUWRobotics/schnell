@@ -55,8 +55,9 @@ executable(
         dependency('opencv4'),
         dependency('apriltag'),
         dependency('nlohmann_json'),
+        dependency('fmt'),
         ceres_dep,
         cctag.dependency('CCTag'),
     ],
-    override_options: ['cpp_std=c++23', 'warning_level=3'],
+    override_options: ['cpp_std=c++20', 'warning_level=3'],
 )

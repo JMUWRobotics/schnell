@@ -1,7 +1,12 @@
 #include <algorithm>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
+
+#if __cplusplus >= 202302L
 #include <print>
+#else
+#include <fmt/core.h> 
+#endif
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
@@ -41,6 +46,7 @@ using Vectors3d = std::vector<Vector3d>;
 using nlohmann::json;
 using std::ranges::transform;
 
+#if __cplusplus >= 202302L
 template<typename Type, int Size>
 struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
     auto format(const Eigen::Vector<Type, Size>& v, std::format_context& ctx) const {
@@ -55,6 +61,24 @@ struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
         );
     }
 };
+using std::println;
+#else
+template<typename Type, int Size>
+struct fmt::formatter<Eigen::Vector<Type, Size>>: fmt::formatter<std::string> {
+    auto format(const Eigen::Vector<Type, Size>& v, fmt::format_context& ctx) const {
+        return fmt::formatter<std::string>::format(
+            std::accumulate(
+                std::next(v.begin()),
+                v.end(),
+                fmt::format("[{}", v[0]),
+                [](std::string a, const Type& x) { return fmt::format("{}, {}", std::move(a), x); }
+            ) + ']',
+            ctx
+        );
+    }
+};
+using fmt::println;
+#endif
 
 std::tuple<Vector3d, std::array<Vector3d, 3>> principal_components(const Vectors3d& vecs) {
     const Vector3d mean =
@@ -331,7 +355,7 @@ struct Plane {
         double max = abc[maxidx];
 
         if (almost_zero(max))
-            std::println(stderr, "Almost zero maximum coefficient");
+            println(stderr, "Almost zero maximum coefficient");
 
         switch (maxidx) {
             case 0: // a
@@ -720,7 +744,7 @@ int main(int argc, const char** argv) {
     } else
         throw std::invalid_argument("bad args");
 
-    std::println("{}", someplane.abcd());
+    println("{}", someplane.abcd());
 
     std::vector<Plane<double>> steps;
 
@@ -792,7 +816,7 @@ int main(int argc, const char** argv) {
 
         std::string error;
         if (!solver_opts.IsValid(&error)) {
-            std::println(stderr, "{}", error);
+            println(stderr, "{}", error);
             return 1;
         }
 
@@ -802,7 +826,7 @@ int main(int argc, const char** argv) {
 
         ceres::Solve(solver_opts, &problem, &summary);
 
-        std::println("{}", summary.FullReport());
+        println("{}", summary.FullReport());
 
         someplane = { abcd };
         steps = callback->consume();
@@ -858,5 +882,5 @@ int main(int argc, const char** argv) {
         }
     }
 
-    std::println("DELIMITER{}", serialized.dump());
+    println("DELIMITER{}", serialized.dump());
 }
