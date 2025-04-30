@@ -499,102 +499,42 @@ struct SinusoidalWaveSurface {
     }
 };
 
-// Residual for the intersection of a line with a sinusoidal wave surface
-template<typename T>
-struct IntersectionResidual {
-    Line<T> line_d;
-    SinusoidalWaveSurface<T> surface_d;
-
-    IntersectionResidual(const Line<double>& l, const SinusoidalWaveSurface<double>& s)
-        :line_d(l), surface_d(s) {}
-
-    template <typename J>
-    bool operator()(const J* const xy, J* residuals) const {
-        J x = xy[0];
-        J y = xy[1];
-
-        // Convert stored double-typed objects to Jet-typed
-        Line<J> line = line_d.template cast<J>();
-        SinusoidalWaveSurface<J> surface = surface_d.template cast<J>();
-
-        // Calculate surface point (Evaluate the wave surface at (x, y))
-        Vector3<J> p = surface.evaluate(x, y);
-        Vector3<J> o = line.pt;               // Point on line
-        Vector3<J> d = line.dir;              // Direction of line
-
-        // Project p onto the line direction to find the closest point
-        J t = (p - o).dot(d);
-        Vector3<J> proj = o + t * d;
-
-        // Calculate difference between point on the surface and the projection
-        Vector3<J> diff = p - proj;
-
-        // Set residuals (difference in 3D space)
-        residuals[0] = diff.x();
-        residuals[1] = diff.y();
-        residuals[2] = diff.z();
-
-        return true;
-    }
-};
-
 /**
  * @brief Computes the intersection point of a line with a sinusoidal wave surface.
  * 
  * @param line The line object represented as a parameterized line in 3D space.
  * @param surface The sinusoidal wave surface object to intersect with.
  * @param isec Output parameter to store the computed intersection point in 3D space.
- * @return true If the intersection is successfully computed and within a reasonable distance.
- * @return false If the intersection is too far away or the computation fails.
  */
 template<typename T>
-bool intersectWithSinPlane(Line<T> line, SinusoidalWaveSurface<T> surface, Vector3<T>& isec) {
-
-    // since only solution with double:
-    const SinusoidalWaveSurface<double> tempplane(surface.jet_param());
-    const Line<double> templine(line.getLineJet());
+Vector3<T> intersectWithSinPlane(const Line<T> &line, const SinusoidalWaveSurface<T> &surface) {
 
     // Initial guess for (x, y) parameters to evaluate on the surface
-    double xy[2] = {0.0, 0.0};
+    // TODO choose initial guess as intersection of flat plane with ray
+    T x {0}, y {0},
+        limit { 1e-3 }, distance { DBL_MAX };
+    constexpr size_t STEPS = 10000;
 
-    ceres::Problem problem;
+    Vector3<T> proj;
 
-    // Add the residual block
-    problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<IntersectionResidual<double>, 3, 2>(
-            new IntersectionResidual<double>{templine, tempplane},
-            ceres::Ownership::TAKE_OWNERSHIP
-        ),
-        nullptr,  // no loss function
-        xy        // the (x, y) on the surface
-    );
+    size_t i;
+    for (i = 0; i < STEPS && distance > limit; ++i) {        
+        Vector3<T> p = surface.evaluate(x, y);
+        Vector3<T> o = line.pt;               // Point on line
+        Vector3<T> d = line.dir;              // Direction of line
 
-    // TODO: see if better parameter can be chosen
-    ceres::Solver::Options options;
-    options.minimizer_type = ceres::MinimizerType::TRUST_REGION;
-    options.linear_solver_type = ceres::LinearSolverType::DENSE_QR;
-    options.minimizer_progress_to_stdout = true; 
-    options.logging_type = ceres::SILENT;
-    options.use_explicit_schur_complement = true; 
-    options.update_state_every_iteration = true;
-    options.function_tolerance = 1e-30;
-    options.gradient_tolerance = 1e-30;
-    options.parameter_tolerance = 1e-30;
-    options.max_num_iterations = 100;
-    options.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        // Project p onto the line direction to find the closest point
+        T t = (p - o).dot(d);
+        proj = o + t * d;
 
+        // Calculate difference between point on the surface and the projection
+        distance = (p - proj).norm();
 
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-   
-    // print("isec sum: {}\n", summary.FullReport());
+        x = proj.x();
+        y = proj.y();
+    }
 
-    // Get the resulting point on the surface
-    Vector3<double> intersection = tempplane.evaluate(xy[0], xy[1]);
-
-    isec = intersection.template cast<T>();
-
-    return true;
+    return proj;
 }
 
 template<typename T>
@@ -743,15 +683,12 @@ bool forward_refract_estimate_sin(
     Vector3<T>& lestimate,
     Vector3<T>& restimate,
     Vector3<T>& lisect,
-    Vector3<T>& risect)
-    {
-
+    Vector3<T>& risect
+) {
     Line<T> lline(pt - T0, T0), rline(pt - T1, T1);
 
-    if (!intersectWithSinPlane(lline, plane, lisect))
-        return false;
-    if (!intersectWithSinPlane(rline, plane, risect))
-        return false;
+    lisect = intersectWithSinPlane(lline, plane);
+    risect = intersectWithSinPlane(rline, plane);
 
     // print("lisect: {}\n", lisect);  
     // print("lline dir: {}\n", lline.dir);

@@ -15,27 +15,7 @@ os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
 datadir = os.environ["HOME"] + '/Documents/schnell/Daten/wasserkiste/foureyes/april'
 
-def parser():
-
-    sin = False
-
-    if len(sys.argv) < 2:
-        
-        sin = False
-
-    else:
-       
-       # get the arguments to the wrigth variabales
-        for elements in sys.argv[1:]:
-
-            print(elements)
-
-            if(elements == "--sin" ):
-                sin = True
-
-    return sin
-
-SIN = parser()
+SIN = '--sin' in sys.argv[1:]
 
 schnell = subprocess.Popen(
     ['builddir/schnell', datadir] + sys.argv,
