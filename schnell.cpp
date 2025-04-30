@@ -2,12 +2,8 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
 
-#if __cplusplus >= 202302L
-#include <print>
-#else
 #include <fmt/core.h> 
 #include <fmt/format.h>
-#endif
 
 #include <apriltag/apriltag.h>
 #include <apriltag/tag36h11.h>
@@ -47,25 +43,6 @@ using Vectors3d = std::vector<Vector3d>;
 using nlohmann::json;
 using std::ranges::transform;
 
-#if __cplusplus >= 202302L
-template<typename Type, int Size>
-struct std::formatter<Eigen::Vector<Type, Size>>: std::formatter<std::string> {
-    auto format(const Eigen::Vector<Type, Size>& v, std::format_context& ctx) const {
-        return std::formatter<std::string>::format(
-            std::accumulate(
-                std::next(v.begin()),
-                v.end(),
-                std::format("[{}", v[0]),
-                [](std::string a, const Type& x) { return std::format("{}, {}", std::move(a), x); }
-            ) + ']',
-            ctx
-        );
-    }
-};
-using std::print;
-using std::format;
-#else
-
 // formater for jet data type
 template <typename T, int N>
 struct fmt::formatter<ceres::Jet<T, N>> : fmt::formatter<std::string> {
@@ -80,47 +57,21 @@ struct fmt::formatter<ceres::Jet<T, N>> : fmt::formatter<std::string> {
     }
 };
 
-// // formater for Eigen::vector data type
-// template<typename Type, int Size>
-// struct fmt::formatter<Eigen::Vector<Type, Size>>: fmt::formatter<std::string> {
-//     auto format(const Eigen::Vector<Type, Size>& v, fmt::format_context& ctx) const {
-//         return fmt::formatter<std::string>::format(
-//             std::accumulate(
-//                 std::next(v.begin()),
-//                 v.end(),
-//                 fmt::format("[{}", v[0]),
-//                 [](std::string a, const Type& x) { return fmt::format("{}, {}", std::move(a), x); }
-//             ) + ']',
-//             ctx
-//         );
-//     }
-// };
-
-template<typename Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
-struct fmt::formatter<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> : fmt::formatter<std::string> {
-    static_assert(Cols == 1, "This formatter only supports column vectors.");
-
-    auto format(const Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>& v, fmt::format_context& ctx) const {
-        if (v.size() == 0)
-            return fmt::formatter<std::string>::format("[]", ctx);
-
+// formater for Eigen::vector data type
+template<typename Type, int Size>
+struct fmt::formatter<Eigen::Vector<Type, Size>>: fmt::formatter<std::string> {
+    auto format(const Eigen::Vector<Type, Size>& v, fmt::format_context& ctx) const {
         return fmt::formatter<std::string>::format(
             std::accumulate(
-                std::next(v.data()),  // skip first
-                v.data() + v.size(),
+                std::next(v.begin()),
+                v.end(),
                 fmt::format("[{}", v[0]),
-                [](std::string a, const Scalar& x) {
-                    return fmt::format("{}, {}", std::move(a), x);
-                }
+                [](std::string a, const Type& x) { return fmt::format("{}, {}", std::move(a), x); }
             ) + ']',
             ctx
         );
     }
 };
-
-using fmt::print;
-using fmt::format;
-#endif
 
 std::tuple<Vector3d, std::array<Vector3d, 3>> principal_components(const Vectors3d& vecs) {
     const Vector3d mean =
@@ -694,7 +645,7 @@ struct Plane {
         double max = abc[maxidx];
 
         if (almost_zero(max))
-            print(stderr, "Almost zero maximum coefficient\n");
+            fmt::println(stderr, "Almost zero maximum coefficient");
 
         switch (maxidx) {
             case 0: // a
@@ -1037,13 +988,13 @@ struct Combo {
 
     Combo(int idx1, int idx2, const std::filesystem::path& datapath):
         idxs(std::make_tuple(idx1, idx2)),
-        i1(cv::imread(datapath / format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
-        i2(cv::imread(datapath / format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
-        m1(cv::imread(datapath / format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
-        m2(cv::imread(datapath / format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
+        i1(cv::imread(datapath / fmt::format("{}.png", idx1), cv::IMREAD_GRAYSCALE)),
+        i2(cv::imread(datapath / fmt::format("{}.png", idx2), cv::IMREAD_GRAYSCALE)),
+        m1(cv::imread(datapath / fmt::format("{}_mask.png", idx1), cv::IMREAD_GRAYSCALE)),
+        m2(cv::imread(datapath / fmt::format("{}_mask.png", idx2), cv::IMREAD_GRAYSCALE)),
         RefTrans(Eigen::Matrix4d::Identity()) {
         cv::FileStorage fs(
-            datapath / format("{}-to-{}.json", idx1, idx2),
+            datapath / fmt::format("{}-to-{}.json", idx1, idx2),
             cv::FileStorage::READ
         );
 
@@ -1180,10 +1131,10 @@ int main(int argc, const char** argv) {
     DetectionType detection_type = args.count("sift") ? DetectionType::SIFT : DetectionType::APRIL;
     std::string datapath = args["datapath"].as<std::string>();
 
-    print(stderr, "data path : {}\n", datapath);
-    print(stderr, "type of detection: {}\n", args.count("sift") ? "sift" : "apriltag");
-    print(stderr, "lone: {}\n", args.count("lone") ? args["lone"].as<double>() : 0.01);
-    print(stderr, "sin: {}\n", args.count("sin") ? "optimizing sin plane" : "optimizing flat plane");
+    fmt::print(stderr, "data path : {}", datapath);
+    fmt::print(stderr, "type of detection: {}", args.count("sift") ? "sift" : "apriltag");
+    fmt::print(stderr, "lone: {}", args["lone"].as<double>());
+    fmt::print(stderr, "sin: {}", args.count("sin") ? "optimizing sin plane" : "optimizing flat plane");
 
     StereoMap<Combo> combos;
     for (size_t i = 0; i < camidxs.size(); ++i) {
@@ -1255,10 +1206,10 @@ int main(int argc, const char** argv) {
             std::accumulate(pattern_evecs_X.cbegin(), pattern_evecs_X.cend(), Vector3d::Zero().eval())
             / pattern_evecs_X.size();
 
-        print("mean: {}\n", (mean_pcv / 2).eval());
-        print("evecsZ: {}\n", mean_evec_Z);
-        print("evecsY: {}\n", mean_evec_Y);
-        print("evecsX: {}\n", mean_evec_X);
+        fmt::println("mean: {}", (mean_pcv / 2).eval());
+        fmt::print("evecsZ: {}", mean_evec_Z);
+        fmt::println("evecsY: {}", mean_evec_Y);
+        fmt::println("evecsX: {}", mean_evec_X);
 
         someplane = Plane((-mean_evec_Z).eval(), (mean_pcv / 2).eval());  // flat plane only one vector in Z direction
         somesinplane = SinusoidalWaveSurface<double>(
@@ -1282,8 +1233,8 @@ int main(int argc, const char** argv) {
         throw std::invalid_argument("bad args");
     }
 
-    print("fist guess: {}\n", someplane.abcd());
-    print("fist sin guess: {}\n", somesinplane.wave_param());
+    fmt::println("fist guess: {}", someplane.abcd());
+    fmt::println("fist sin guess: {}", somesinplane.wave_param());
 
     // //NOTE: HERE -----------------------------------
     // Vector3<double> intersections;
@@ -1529,7 +1480,7 @@ int main(int argc, const char** argv) {
         std::string error;
 
         if (!solver_opts.IsValid(&error)) {
-            print(stderr, "error : {}\n", error);
+            fmt::println(stderr, "error : {}", error);
             return 1;
         }
 
@@ -1539,12 +1490,12 @@ int main(int argc, const char** argv) {
 
         ceres::Solve(solver_opts, &problem, &summary);
         
-        print("ceres report: {}\n", summary.FullReport());
+        fmt::println("ceres report: {}", summary.FullReport());
 
         someplane = {abcd};
-        print("best plane: {}\n", someplane.abcd());
+        fmt::print("best plane: {}", someplane.abcd());
         somesinplane = {sin_params};
-        print("best sin plane: {}\n", somesinplane.wave_param());
+        fmt::print("best sin plane: {}", somesinplane.wave_param());
 
         steps = callback->consume();
         steps_sin = callback_sin->consume();
@@ -1603,7 +1554,7 @@ int main(int argc, const char** argv) {
             }
         }
 
-        print("DELIMITER{}\n", serialized.dump());
+        fmt::println("DELIMITER{}", serialized.dump());
 
     }
     else{
@@ -1665,6 +1616,6 @@ int main(int argc, const char** argv) {
             }
         }
 
-        print("DELIMITER{}\n", serialized.dump());
+        fmt::println("DELIMITER{}", serialized.dump());
     }
 }
