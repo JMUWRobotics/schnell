@@ -499,42 +499,108 @@ struct SinusoidalWaveSurface {
     }
 };
 
+// methode befor using Newtown gauss iteration -> this one is not correct little offset for test point
+// template<typename T>
+// Vector3<T> intersectWithSinPlane(const Line<T> &line, const SinusoidalWaveSurface<T> &surface) {
+
+//     // Initial guess for (x, y) parameters to evaluate on the surface
+//     // choose initial guess as intersection of flat plane with ray
+
+//     T x {0}, y {0}, limit { 1e-4 }, distance { DBL_MAX };
+//     constexpr size_t STEPS = 10000;
+
+//     Vector3<T> proj;
+
+//     size_t i;
+//     for (i = 0; i < STEPS && distance > limit; ++i) {        
+        
+//         Vector3<T> p = surface.evaluate(x, y);
+//         Vector3<T> o = line.pt;               // Point on line
+//         Vector3<T> d = line.dir;              // Direction of line
+
+//         // Project p onto the line direction to find the closest point
+//         T t = (p - o).dot(d);
+//         proj = o + t * d;
+
+//         // Calculate difference between point on the surface and the projection
+//         distance = (p - proj).norm();
+
+//         x = proj.x();
+//         y = proj.y();
+//     }
+
+//     return proj;
+// }
+
 /**
  * @brief Computes the intersection point of a line with a sinusoidal wave surface.
  * 
  * @param line The line object represented as a parameterized line in 3D space.
  * @param surface The sinusoidal wave surface object to intersect with.
- * @param isec Output parameter to store the computed intersection point in 3D space.
  */
 template<typename T>
-Vector3<T> intersectWithSinPlane(const Line<T> &line, const SinusoidalWaveSurface<T> &surface) {
+Vector3<T> intersectWithSinPlane(const Line<T>& line, const SinusoidalWaveSurface<T>& surface) {
+    
+    // Iteration of gauss newton algo see: https://en.wikipedia.org/wiki/Gauss%E2%80%93Newton_algorithm
 
-    // Initial guess for (x, y) parameters to evaluate on the surface
-    // TODO choose initial guess as intersection of flat plane with ray
-    T x {0}, y {0},
-        limit { 1e-3 }, distance { DBL_MAX };
+    T x {0}, y {0}, limit { 1e-4 };
     constexpr size_t STEPS = 10000;
 
-    Vector3<T> proj;
-
-    size_t i;
-    for (i = 0; i < STEPS && distance > limit; ++i) {        
+    for (size_t iter = 0; iter < STEPS; ++iter) {
+        // Surface point
         Vector3<T> p = surface.evaluate(x, y);
-        Vector3<T> o = line.pt;               // Point on line
-        Vector3<T> d = line.dir;              // Direction of line
 
-        // Project p onto the line direction to find the closest point
+        // Line direction and origin
+        Vector3<T> d = line.dir.normalized();
+        Vector3<T> o = line.pt;
+
+        // Closest point on line to surface point
         T t = (p - o).dot(d);
-        proj = o + t * d;
+        Vector3<T> q = o + t * d;
 
-        // Calculate difference between point on the surface and the projection
-        distance = (p - proj).norm();
+        // Residual
+        // r(x, y) = surface(x, y) - project_onto_line(surface(x, y))
+        Vector3<T> r = p - q;
 
-        x = proj.x();
-        y = proj.y();
+        if (r.norm() < limit) break;
+
+        // Compute df/dx and df/dy (Jacobian of p(x, y))
+        Vector3<T> du = surface.u;
+        Vector3<T> dv = surface.v;
+        T k = surface.frequency;
+        T phase = surface.phase;
+        T A = surface.amplitude;
+        Vector3<T> n = surface.normal;
+
+        T arg = k * x + k * y + phase;
+        T d_sin = A * k * ceres::cos(arg);
+
+        Vector3<T> dpdx = du + d_sin * n;
+        Vector3<T> dpdy = dv + d_sin * n;
+
+        // Jacobian J = [dpdx - d*(d⋅dpdx), dpdy - d*(d⋅dpdy)]
+        // because q(x, y) = o + ((p - o)⋅d) * d, and we need df = dp - dq
+        Vector3<T> dqdx = d * dpdx.dot(d);
+        Vector3<T> dqdy = d * dpdy.dot(d);
+
+        Vector3<T> drdx = dpdx - dqdx;
+        Vector3<T> drdy = dpdy - dqdy;
+
+        // Build system: J * delta = -r
+        Eigen::Matrix<T, 3, 2> J;
+        J.col(0) = drdx;
+        J.col(1) = drdy;
+
+        // Solve least-squares (since J isn't square)
+        Eigen::JacobiSVD<Eigen::Matrix<T, 3, 2>> svd(J, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Eigen::Matrix<T, 2, 1> delta = svd.solve(-r);
+
+
+        x += delta(0);
+        y += delta(1);
     }
 
-    return proj;
+    return surface.evaluate(x, y);
 }
 
 template<typename T>
@@ -1068,10 +1134,10 @@ int main(int argc, const char** argv) {
     DetectionType detection_type = args.count("sift") ? DetectionType::SIFT : DetectionType::APRIL;
     std::string datapath = args["datapath"].as<std::string>();
 
-    fmt::print(stderr, "data path : {}", datapath);
-    fmt::print(stderr, "type of detection: {}", args.count("sift") ? "sift" : "apriltag");
-    fmt::print(stderr, "lone: {}", args["lone"].as<double>());
-    fmt::print(stderr, "sin: {}", args.count("sin") ? "optimizing sin plane" : "optimizing flat plane");
+    fmt::println(stderr, "data path : {}", datapath);
+    fmt::println(stderr, "type of detection: {}", args.count("sift") ? "sift" : "apriltag");
+    fmt::println(stderr, "lone: {}", args["lone"].as<double>());
+    fmt::println(stderr, "sin: {}", args.count("sin") ? "optimizing sin plane" : "optimizing flat plane");
 
     StereoMap<Combo> combos;
     for (size_t i = 0; i < camidxs.size(); ++i) {
@@ -1174,18 +1240,18 @@ int main(int argc, const char** argv) {
     fmt::println("fist sin guess: {}", somesinplane.wave_param());
 
     // //NOTE: HERE -----------------------------------
-    // Vector3<double> intersections;
-    // SinusoidalWaveSurface<double> wave_surface = {
-    //     {0.1522135796926206, 0.07386223835536908, 0.2721447693021134}, // origin
-    //     {-0.8779893174123757, 0.11769968478070637, 0.46398442076461244}, // u    -> propagation is in this direction
-    //     {-0.007492214882922366, 0.9658229358896685, -0.25909442916745534}, // v
-    //     {0.47911459271736, 0.23195390399035876, 0.8465498174761541}, // normal
-    //     0, 0, 0 // amplitude, frequency, phase
-    // };
-    // Line<double> line({0, 0, 1}, {0,1,1}); // vec , origin
-    // // print("sin wave: {}\n", wave_surface.wave_param());
-    // bool res = intersectWithSinPlane(line, wave_surface, intersections);
-    // print("intersection: {}\n", intersections);
+    Vector3<double> intersections;
+    SinusoidalWaveSurface<double> wave_surface = {
+        {0.1522135796926206, 0.07386223835536908, 0.2721447693021134}, // origin
+        {-0.8779893174123757, 0.11769968478070637, 0.46398442076461244}, // u    -> propagation is in this direction
+        {-0.007492214882922366, 0.9658229358896685, -0.25909442916745534}, // v
+        {0.47911459271736, 0.23195390399035876, 0.8465498174761541}, // normal
+        0, 0, 0 // amplitude, frequency, phase
+    };
+    Line<double> line({0, 1, 1}, {0,0,1}); // vec , origin
+    // fmt::println("sin wave: {}\n", wave_surface.wave_param());
+    intersections = intersectWithSinPlane(line, wave_surface);
+    fmt::println("intersection: {}\n", intersections);
     // //NOTE: HERE -----------------------------------
 
     std::vector<Plane<double>> steps;

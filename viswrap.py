@@ -13,7 +13,7 @@ from scipy.optimize import least_squares
 
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
-datadir = os.environ["HOME"] + '/Documents/schnell/Daten/wasserkiste/foureyes/april'
+datadir = os.environ["HOME"] + '/Documents/schnell-git/Daten/wasserkiste/foureyes/april'
 
 SIN = '--sin' in sys.argv[1:]
 
@@ -32,9 +32,9 @@ stdout, jsondump = stdout.decode().strip().split('DELIMITER')
 
 print(stdout)
 
-output_path ="output.json"
-with open(output_path, "w") as f:
-    f.write(jsondump)
+# output_path ="output.json"
+# with open(output_path, "w") as f:
+#     f.write(jsondump)
     
 data = json.loads(jsondump)
 steps = data["steps"]
