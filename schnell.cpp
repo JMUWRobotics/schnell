@@ -156,26 +156,25 @@ void intersect_apriltag_dects(
 }
 
 void intersect_cctag_dects(
-    boost::ptr_list<cctag::CCTag>& l,
-    boost::ptr_list<cctag::CCTag>& r,
+    cctag::CCTag::List& l,
+    cctag::CCTag::List& r,
     std::vector<cv::Vec2d>& lout,
     std::vector<cv::Vec2d>& rout
 ) {
-    static const auto idcomp = [](const auto& l, const auto& r) { return l.id() < r.id(); };
     static const auto idmap = [](const auto& d) { return d.id(); };
 
     std::vector<int> lids, rids;
     std::set<int> isect;
 
-    l.sort(idcomp);
-    r.sort(idcomp);
+    l.sort();
+    r.sort();
 
     boost::transform(l, std::back_inserter(lids), idmap);
     boost::transform(r, std::back_inserter(rids), idmap);
 
     std::ranges::set_intersection(lids, rids, std::inserter(isect, isect.begin()));
 
-    auto fill_out = [&](const auto& ids, const auto& d, auto& out) {
+    static auto fill_out = [&](const auto& ids, const auto& d, auto& out) {
         auto dit = d.cbegin();
         for (size_t i = 0; i < ids.size(); ++i, ++dit)
             if (isect.contains(ids[i]))
@@ -216,12 +215,30 @@ void detect_cctags(
     std::vector<cv::Vec2d>& ldects,
     std::vector<cv::Vec2d>& rdects
 ) {
-    static const cctag::Parameters cctp { 4 };
+    static const auto is_unreliable = [](const cctag::CCTag &t){ return t.getStatus() != cctag::status::id_reliable; };
+    static const auto same_id = [](const auto &a, const auto &b) { return a.id() == b.id(); };
+    static const auto filter_dupes = [](cctag::CCTag::List &l) {
+        decltype(l.begin()) it;
+        while ((it = std::adjacent_find(l.begin(), l.end(), same_id)) != l.end()) {
+            if (it->quality() > boost::next(it)->quality())
+                l.erase(boost::next(it));
+            else
+                l.erase(it);
+        }
+    };
+
+    static const cctag::Parameters cctp { 3 };
     static const cctag::CCTagMarkersBank cctb { cctp._nCrowns };
 
-    boost::ptr_list<cctag::CCTag> ld, rd;
+    cctag::CCTag::List ld, rd;
     cctag::cctagDetection(ld, 0, 0, limg, cctp, cctb);
     cctag::cctagDetection(rd, 0, 0, rimg, cctp, cctb);
+
+    ld.erase_if(is_unreliable);
+    rd.erase_if(is_unreliable);
+
+    filter_dupes(ld);
+    filter_dupes(rd);
 
     intersect_cctag_dects(ld, rd, ldects, rdects);
 }
@@ -666,6 +683,7 @@ int main(int argc, const char** argv) {
         ("point", "xyz point on plane", cxxopts::value<std::vector<double>>())
         ("perpvec", "xyz components of vector perpendicular to plane", cxxopts::value<std::vector<double>>())
         ("sift", "enable sift detection")
+        ("cctag", "enable CCTag detection")
         ("solve", "runs solver")
         //("huber", "huber loss coefficient", cxxopts::value<double>()->default_value("0.1"))
         ("lone", "softlone loss coefficient", cxxopts::value<double>()->default_value("0.1"));
@@ -677,7 +695,10 @@ int main(int argc, const char** argv) {
     // clang-format on
 
     bool solve = args.count("solve");
-    DetectionType detection_type = args.count("sift") ? DetectionType::SIFT : DetectionType::APRIL;
+    if (args.count("cctag") && args.count("sift"))
+        throw std::invalid_argument("cant have both cctag and sift");
+
+    DetectionType detection_type = args.count("sift") ? DetectionType::SIFT : args.count("cctag") ? DetectionType::CCTAG : DetectionType::APRIL;
 
     std::string datapath = args["datapath"].as<std::string>();
 
