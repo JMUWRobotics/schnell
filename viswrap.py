@@ -86,17 +86,17 @@ def vector_align(a, b):
 
 def intersect(abcd, p, n):
     n = n / np.linalg.norm(n)
-    ax, ay, az = p + n
-    bx, by, bz = p
-    a = np.array([ax, ay, az, 1]).reshape(-1, 1)
-    b = np.array([bx, by, bz, 1]).reshape(-1, 1)
+    a = np.append(p + n, 1).reshape(-1, 1)
+    b = np.append(p, 1).reshape(-1, 1)
     pluecker = a @ b.T - b @ a.T
-    x, y, z, w = pluecker.T @ abcd
+    isect = pluecker.T @ abcd
 
-    if np.isclose(w, 0):
-        return None
+    assert a.shape == b.shape == (4,1), f'{a.shape} {b.shape} must be (4,1)'
 
-    return np.array([x / w, y / w, z / w])
+    # if np.isclose(isect[-1], 0):
+    #    return None
+
+    return isect[:-1] / isect[-1]
 
 drawn_cams = set()
 cam_colors = [
@@ -150,7 +150,8 @@ def draw(_):
         evals, evecs = np.linalg.eig(np.cov(restimates.T))
         rnormal = evecs[:, np.argmin(evals)]
 
-        normals.append((lnormal + rnormal) / 2)
+        normals.append(lnormal)
+        normals.append(rnormal)
         means.append( (restimates.mean(axis=0) + lestimates.mean(axis=0)) / 2 )
 
         # xlim[0] = min(np.min(triangulations[:,0]), xlim[0])
@@ -177,15 +178,16 @@ def draw(_):
             parent=view.scene,
             face_color='blue'
         ))
+        goodback = lambda key: [vec for vec in pair[key] if all((x is not None) and (not np.isnan(x)) for x in vec)]
         curscene.append(scene.visuals.Markers(
-            pos=-np.array(pair["lback"]) + T0,
+            pos=-np.array(goodback("lback")) + T0,
             parent=view.scene,
             size=3.5,
             edge_width_rel=0.5,
             edge_color=cam_colors[idx1]
         ))
         curscene.append(scene.visuals.Markers(
-            pos=-np.array(pair["rback"]) + T1,
+            pos=-np.array(goodback("rback")) + T1,
             parent=view.scene,
             size=3.5,
             edge_width_rel=0.5,
@@ -219,9 +221,15 @@ def draw(_):
             )
             drawn_cams.add(idx2)
 
-    normal = np.sum(normals, axis=0)
+    norm_normals = []
+    for n in normals:
+        n /= np.linalg.norm(n)
+        if n[2] > 0:
+            n *= -1
+        norm_normals.append(n)
+    normal = np.sum(norm_normals, axis=0)
     normal /= np.linalg.norm(normal)
-    mean = np.mean(means, axis=0)
+    mean = np.mean(means, axis=0) # TODO reason whether or not median makes more sense
     isect = intersect(plane_abcd, mean, normal)
 
     if isect is not None:
